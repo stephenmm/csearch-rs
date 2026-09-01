@@ -19,3 +19,10 @@ credentials.json
 *.log
 tmp/
 temp/
+
+# --- Rust ---
+/target
+*.tmp
+
+# --- compare harness output ---
+compare_results.md

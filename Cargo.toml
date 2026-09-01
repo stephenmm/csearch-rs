@@ -1,0 +1,38 @@
+[package]
+name = "csearch-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rust port of Google Code Search (cindex/csearch) with SIMD trigram extraction and parallel indexing/search"
+license = "BSD-3-Clause"
+
+[lib]
+name = "csearch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cindex"
+path = "src/bin/cindex.rs"
+
+[[bin]]
+name = "csearch"
+path = "src/bin/csearch.rs"
+
+[dependencies]
+anyhow = "=1.0.86"
+clap = { version = "=4.4.18", features = ["derive"] }
+memchr = "=2.7.4"
+memmap2 = "=0.9.4"
+rayon = "=1.10.0"
+regex = "=1.10.6"
+regex-syntax = "=0.8.4"
+walkdir = "=2.5.0"
+
+[dev-dependencies]
+tempfile = "=3.10.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
