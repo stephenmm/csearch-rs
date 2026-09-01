@@ -58,15 +58,54 @@ py compare_csearch.py --corpus E:\proj   # parity/timing vs Go csearch
 Index lives at `$CSEARCHINDEX` or `%USERPROFILE%\.csearchindex`. Exit status 1
 when nothing matched, like grep.
 
+## Toolchain on this machine (hard-won — trust this)
+
+Rust lives on **D:** (`D:\rust\.cargo`, `D:\rust\.rustup`), not E: and not C:.
+`CARGO_HOME`/`RUSTUP_HOME` are set as user env vars and `D:\rust\.cargo\bin` is
+on the user PATH. rustc/cargo 1.98.0, host `x86_64-pc-windows-msvc`.
+
+**Do not move CARGO_HOME to E:.** E: is exFAT, whose timestamp epoch starts in
+1980, and crates.io tarballs carry a 1970 mtime — so unpacking any crate dies
+with `failed to set mtime ... The parameter is incorrect. (os error 87)`.
+The same exFAT quirk made rustup itself report the bogus
+`toolchain 'stable-x86_64-pc-windows-msvc' is not installable` even though the
+toolchain was fully extracted and working; both problems vanished on NTFS.
+C: was rejected as the home because it has only ~16 GB free (the toolchain
+alone is 1.3 GB, and the crate cache grows without bound).
+
+The winget `Rustlang.Rustup` install exits 1 partway: it downloads and extracts
+the toolchain but never writes `settings.toml` or creates the proxy shims. Fix
+is `rustup default stable` + `rustup self update` once RUSTUP_HOME is on NTFS.
+
+The project tree itself stays on E: per the global convention; only the
+toolchain and crate cache are on D:. `target/` on exFAT builds fine.
+
+Linking uses MSVC Build Tools at `E:\VS\BuildTools`; if a build ever fails to
+find `link.exe`, run it from a `vcvars64.bat` shell.
+
+## Status
+
+**Verified on this machine 2026-09-01** (Windows 10, rustc 1.98.0):
+
+- `cargo test` — 8/8 pass (7 unit: AVX2-vs-scalar kernel, bitmap dedup vs naive
+  set, varint round trip, Cox regexp cases, case folding, big-class; 1
+  integration: index/query round trip). Clean build, no warnings.
+- `cargo build --release` — clean, ~1m20s.
+- Live smoke test on `E:\proj\github\flaskhub`: 732 files indexed (320 skipped)
+  in 4.0s, 93,801 trigrams, 3.05 MB index; queries resolve candidates in
+  ~350 µs.
+- **Parity against `grep -Ec`**: exact per-file count agreement over the .py
+  subset for `def `, `return`, `import numpy`, `self\.[a-z_]+ =`, `^from `
+  (140/122/39/21/136 files respectively). Harness: `parity.py` pattern, run
+  ad hoc — see git history of this file.
+
 ## Open questions / TODO
 
-- **No Rust toolchain on this machine yet** — `cargo`/`rustc`/`rustup` are not
-  installed and `~/.cargo` does not exist, so the code in this repo has never
-  been compiled here. Nothing below the "imported" line has been verified on
-  this box. Install rustup first (note: C: is space-constrained, so consider
-  `CARGO_HOME`/`RUSTUP_HOME` on E:). MSVC Build Tools are already present at
-  `E:\VS\BuildTools`, so the `x86_64-pc-windows-msvc` host should link.
-- Go is not installed either, so `compare_csearch.py` cannot run its Go side
-  until `winget install GoLang.Go` (the harness offers to do this).
-- The benchmark table in README.md was produced elsewhere; re-run
-  `compare_csearch.py` on this machine to get local numbers.
+- Go is not installed, so `compare_csearch.py` cannot run its Go side until
+  `winget install GoLang.Go` (the harness offers to do this). The README's
+  benchmark table was produced elsewhere — re-run the harness here for local
+  numbers.
+- `setup_csearch.py` installs the binaries to `%USERPROFILE%\bin`, which is on
+  C:. That directory is already on PATH. Not yet run.
+- Nothing indexes automatically; the index at `%USERPROFILE%\.csearchindex` has
+  not been created (the smoke test used a scratch `CSEARCHINDEX`).
