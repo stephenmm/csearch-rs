@@ -149,6 +149,86 @@ src/write.rs     parallel index builder + on-disk format
 src/read.rs      mmap reader, posting lists, query evaluation
 ```
 
+## csearch-rs and ripgrep
+
+[ripgrep](https://github.com/BurntSushi/ripgrep) showed what modern hardware
+does for brute-force search: SIMD in the inner loops and every core busy.
+csearch-rs applies that same thinking *on top of* Cox's index rather than
+instead of it.
+
+The sharing is literal rather than spiritual. ripgrep matches through its
+`grep-regex` crate, which is built on `regex-automata` and `regex-syntax` — the
+same crates csearch-rs uses directly, by the same author, both bottoming out in
+`memchr` and `aho-corasick`'s Teddy SIMD prefilters. Cox's Go original had
+neither: a scalar byte loop for trigram extraction and a single-threaded custom
+matcher. So csearch-rs is close to ripgrep's matching engine aimed at a
+candidate set instead of at the whole tree, with AVX2 and rayon in the indexer
+as well.
+
+That does not make it strictly better. Which tool wins depends on two things,
+and both were measured on the Linux kernel source — 94,842 files, 1.6 GB,
+against ripgrep 15.2.0.
+
+### What the pattern looks like
+
+What matters is not how many lines match. It is how much of the tree the
+trigram query can rule out before a single file is read:
+
+| pattern | files left as candidates | vs ripgrep |
+|---|---|---|
+| `pthread_mutex_t` | 140 (0.1%) | **14.0x faster** |
+| `foo.*bar` | 421 (0.4%) | **8.2x faster** |
+| `kmem_cache_alloc` | 557 (0.6%) | **4.8x faster** |
+| `struct task_struct` | 2,989 (3.2%) | 1.2x |
+| `spin_lock_irqsave` | 3,746 (4.0%) | 1.0x |
+| `devm_kzalloc` | 5,731 (6.1%) | 0.9x |
+| `^static inline` | 16,055 (17.0%) | 0.5x — slower |
+| `[0-9]{4}-[0-9]{2}-[0-9]{2}` | 22,739 (24.1%) | 0.4x — slower |
+| `[a-z]+` | 94,274 (100%) | 0.5x — slower |
+
+Grouped: pruning to **under 1%** of files gives a median **8.2x**; 1–20% is a
+wash at 0.9x; above 20% ripgrep wins at 0.4x. The date regexp is the instructive
+one — only 1,073 lines match, but digit classes produce common trigrams that
+rule almost nothing out, so the index is paid for and then most of the kernel is
+grepped anyway.
+
+The rule of thumb: **a distinctive literal substring wins big; a class-heavy
+regexp with no literal in it loses.** Symbol searches are the former.
+
+### Whether the tree is in the page cache
+
+The table above is warm-cache — the kernel had already been read and 1.6 GB
+fits in this machine's RAM. That is the *worst* case for an index, because
+ripgrep's reads are nearly free. Cold, the picture changes completely:
+
+| pattern | ripgrep cold | csearch cold | cold | (warm) |
+|---|---|---|---|---|
+| `pthread_mutex_t` | 17,049 ms | 533 ms | **32.0x** | 13.0x |
+| `kmem_cache_alloc` | 13,119 ms | 574 ms | **22.8x** | 4.1x |
+| `spin_lock_irqsave` | 13,181 ms | 1,469 ms | **9.0x** | 1.0x |
+| `^static inline` | 14,456 ms | 3,437 ms | **4.2x** | 0.5x |
+
+Cold, csearch-rs is faster on *every* pattern — including the one it loses on
+warm — because ripgrep must read 1.6 GB from disk while csearch-rs reads a
+175 MB index plus a handful of candidate files. This is the case that matters
+for a tree larger than RAM, which never stays cached.
+
+### Which to use
+
+**Reach for ripgrep by default.** It needs no index, so it is never stale, it
+honours `.gitignore`, and on a warm tree it is faster for most patterns.
+
+**csearch-rs earns its keep** when you search the same large tree over and over
+with specific patterns — symbol names, error strings, identifiers — or when the
+tree is too big to stay in the page cache. The index costs 21 s and 175 MB for
+the kernel, once.
+
+One caveat when comparing results: the two do not search identical file sets.
+csearch-rs omits files it declined to index — very long lines, more than 20,000
+distinct trigrams, invalid UTF-8 — which ripgrep still reads. Invisible for a
+selective pattern; on `[a-z]+` over the whole kernel it is a 0.2% difference in
+match count.
+
 ## Compared with Google's codesearch
 
 This is a rewrite of [google/codesearch](https://github.com/google/codesearch)
