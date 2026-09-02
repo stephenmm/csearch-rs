@@ -67,7 +67,7 @@ fn nested_roots_do_not_duplicate_results() {
 fn missing_index_says_how_to_create_one() {
     let dir = tempfile::tempdir().unwrap();
     let out = csearch(&dir.path().join("none"), &["foo"]);
-    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2), "an error, not 'no match'");
     let err = text(&out.stderr);
     assert!(err.contains("cindex"), "no hint to run cindex: {err}");
     assert!(!err.contains("os error"), "raw OS error leaked: {err}");
@@ -194,13 +194,112 @@ fn corrupt_index_is_reported_not_crashed() {
     let out = csearch(&index, &["abc"]);
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "should be an error exit, not an abort: {:?}",
+        Some(2),
+        "should be an error exit (2), not an abort: {:?}",
         out.status
     );
     let err = text(&out.stderr);
     assert!(err.contains("cindex --reset"), "{err}");
     assert!(!err.contains("panicked"), "{err}");
+}
+
+#[test]
+fn exit_codes_follow_grep() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("a.txt"), "needle\n").unwrap();
+    let index = dir.path().join("index");
+    assert!(cindex(&index, &[root.to_str().unwrap()]).status.success());
+
+    assert_eq!(csearch(&index, &["needle"]).status.code(), Some(0));
+    assert_eq!(csearch(&index, &["zzz_nothing"]).status.code(), Some(1));
+    // An error must not share the "nothing matched" code, or a script
+    // cannot tell a typo in the regexp from an empty result.
+    assert_eq!(csearch(&index, &["("]).status.code(), Some(2));
+    assert_eq!(
+        csearch(&dir.path().join("none"), &["needle"]).status.code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn deleted_file_is_reported_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("a.txt"), "needle\n").unwrap();
+    fs::write(root.join("b.txt"), "needle\n").unwrap();
+    let index = dir.path().join("index");
+    assert!(cindex(&index, &[root.to_str().unwrap()]).status.success());
+    fs::remove_file(root.join("b.txt")).unwrap();
+
+    // The stale entry used to vanish silently, so a stale index simply
+    // looked like fewer matches.
+    let out = csearch(&index, &["-l", "needle"]);
+    assert!(out.status.success());
+    assert_eq!(text(&out.stdout).lines().count(), 1);
+    let err = text(&out.stderr);
+    assert!(err.contains("1 indexed file(s) no longer exist"), "{err}");
+    assert!(err.contains("cindex"), "no hint to re-index: {err}");
+}
+
+#[cfg(windows)]
+fn make_unreadable(path: &Path) -> Option<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // An exclusive open: every other open of this file fails with a sharing
+    // violation for as long as the handle lives.
+    Some(
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap(),
+    )
+}
+#[cfg(windows)]
+fn restore_readable(_: &Path) {}
+
+#[cfg(unix)]
+fn make_unreadable(path: &Path) -> Option<fs::File> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0)).unwrap();
+    None
+}
+#[cfg(unix)]
+fn restore_readable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+#[test]
+fn unreadable_file_is_reported_without_verbose() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("ok.txt"), "readable\n").unwrap();
+    let secret = root.join("secret.txt");
+    fs::write(&secret, "unreadable\n").unwrap();
+    let guard = make_unreadable(&secret);
+    if fs::read(&secret).is_ok() {
+        eprintln!("skipping: this user can read the file anyway (root?)");
+        return;
+    }
+
+    let index = dir.path().join("index");
+    // No --verbose: a permission problem used to be hidden behind it, with
+    // only "(1 skipped)" and no reason.
+    let out = cindex(&index, &[root.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("secret.txt"),
+        "unreadable file not reported: {err}"
+    );
+    assert!(err.contains("1 files indexed (1 skipped)"), "{err}");
+
+    drop(guard);
+    restore_readable(&secret);
 }
 
 #[test]

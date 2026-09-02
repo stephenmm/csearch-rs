@@ -40,6 +40,8 @@ pub struct BuildOptions {
     pub verbose: bool,
     /// Approximate bytes of source text processed per batch.
     pub batch_bytes: u64,
+    /// Files larger than this are skipped, and counted as skipped.
+    pub max_file_bytes: u64,
 }
 
 impl Default for BuildOptions {
@@ -47,6 +49,7 @@ impl Default for BuildOptions {
         BuildOptions {
             verbose: false,
             batch_bytes: 256 << 20,
+            max_file_bytes: MAX_FILE_LEN,
         }
     }
 }
@@ -173,9 +176,11 @@ pub fn resolve_roots(stored: &[String], add: &[PathBuf], remove: &[PathBuf]) -> 
     Ok(plan)
 }
 
-/// Collect regular files under `roots` in sorted order with their sizes.
-fn walk(roots: &[String], verbose: bool) -> Vec<(PathBuf, u64)> {
+/// Collect regular files under `roots` in sorted order with their sizes,
+/// plus the number of files skipped for being over `max_file_bytes`.
+fn walk(roots: &[String], max_file_bytes: u64) -> (Vec<(PathBuf, u64)>, usize) {
     let mut files = Vec::new();
+    let mut too_large = 0usize;
     for root in roots {
         let it = WalkDir::new(root)
             .follow_links(false)
@@ -186,9 +191,9 @@ fn walk(roots: &[String], verbose: bool) -> Vec<(PathBuf, u64)> {
             let entry = match entry {
                 Ok(e) => e,
                 Err(err) => {
-                    if verbose {
-                        eprintln!("cindex: {err}");
-                    }
+                    // A directory we cannot enter is worth a line even without
+                    // --verbose; the user would otherwise never know.
+                    eprintln!("cindex: {err}");
                     continue;
                 }
             };
@@ -196,16 +201,18 @@ fn walk(roots: &[String], verbose: bool) -> Vec<(PathBuf, u64)> {
                 continue;
             }
             let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if len > MAX_FILE_LEN {
-                if verbose {
-                    eprintln!("cindex: {}: too large, skipping", entry.path().display());
-                }
+            if len > max_file_bytes {
+                eprintln!(
+                    "cindex: {}: {len} bytes is over the {max_file_bytes}-byte limit, skipping",
+                    entry.path().display()
+                );
+                too_large += 1;
                 continue;
             }
             files.push((entry.into_path(), len));
         }
     }
-    files
+    (files, too_large)
 }
 
 /// Build a fresh index of `roots` at `out`.
@@ -220,9 +227,10 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
         eprintln!("cindex: {child} is inside {parent}, not indexing it twice");
     }
 
-    let files = walk(&root_strs, opts.verbose);
+    let (files, too_large) = walk(&root_strs, opts.max_file_bytes);
     let mut stats = Stats {
-        files_seen: files.len(),
+        files_seen: files.len() + too_large,
+        files_skipped: too_large,
         ..Default::default()
     };
     if opts.verbose {
@@ -260,9 +268,9 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
                 let data = match fs::read(path) {
                     Ok(d) => d,
                     Err(err) => {
-                        if opts.verbose {
-                            eprintln!("cindex: {}: {err}", path.display());
-                        }
+                        // Always reported: unlike a binary file, an unreadable
+                        // one is rare and something the user can act on.
+                        eprintln!("cindex: {}: {err}", path.display());
                         return None;
                     }
                 };
@@ -547,6 +555,26 @@ mod tests {
         assert!(build_index(&[root], &out, &BuildOptions::default()).is_err());
         assert!(!out.with_extension("tmp").exists(), "tmp file left behind");
         assert!(out.is_dir(), "the directory in the way must be untouched");
+    }
+
+    #[test]
+    fn too_large_files_are_counted_as_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("small.txt"), "tiny\n").unwrap();
+        fs::write(root.join("big.txt"), "x".repeat(64)).unwrap();
+        let out = dir.path().join("index");
+        // Over-limit files used to vanish without being counted at all.
+        let opts = BuildOptions {
+            max_file_bytes: 16,
+            ..Default::default()
+        };
+        let stats = build_index(std::slice::from_ref(&root), &out, &opts).unwrap();
+        assert_eq!(
+            (stats.files_indexed, stats.files_skipped, stats.files_seen),
+            (1, 1, 2)
+        );
     }
 
     #[test]

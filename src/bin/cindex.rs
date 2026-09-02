@@ -96,6 +96,7 @@ fn main() -> Result<()> {
     let opts = BuildOptions {
         verbose: args.verbose,
         batch_bytes: args.batch_mib << 20,
+        ..Default::default()
     };
     let stats = build_index(&plan.roots, &index_path, &opts)?;
     eprintln!(

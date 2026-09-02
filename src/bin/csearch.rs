@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use regex::bytes::{Regex, RegexBuilder};
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
@@ -65,6 +66,10 @@ struct Grep {
     list: bool,
     names: bool,
     line_numbers: bool,
+    /// Indexed files that no longer exist, or could not be read: counted
+    /// here and reported once at the end, so a stale index is never silent.
+    missing: AtomicUsize,
+    unreadable: AtomicUsize,
 }
 
 impl Grep {
@@ -72,7 +77,15 @@ impl Grep {
     fn file(&self, name: &str) -> (Vec<u8>, usize) {
         match std::fs::read(name) {
             Ok(data) => self.grep_bytes(name, &data),
-            Err(_) => (Vec::new(), 0),
+            Err(e) => {
+                let counter = if e.kind() == io::ErrorKind::NotFound {
+                    &self.missing
+                } else {
+                    &self.unreadable
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+                (Vec::new(), 0)
+            }
         }
     }
 
@@ -154,7 +167,21 @@ fn quiet_on_closed_pipe(result: io::Result<()>) -> io::Result<()> {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    // grep's convention, so scripts can tell a typo from an empty result:
+    // 0 matched, 1 nothing matched, 2 an error. clap already exits 2 on a
+    // usage error.
+    let code = match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            2
+        }
+    };
+    std::process::exit(code);
+}
+
+fn run() -> Result<i32> {
     let args = Args::parse();
     let t0 = Instant::now();
     if let Some(n) = args.threads {
@@ -209,6 +236,8 @@ fn main() -> Result<()> {
         list: args.list_files,
         names: !args.no_names,
         line_numbers: args.line_numbers,
+        missing: AtomicUsize::new(0),
+        unreadable: AtomicUsize::new(0),
     };
 
     // Grep in chunks, in candidate (path) order, writing each chunk while
@@ -243,13 +272,20 @@ fn main() -> Result<()> {
         pending = following;
     }
     quiet_on_closed_pipe(w.flush())?;
+    let missing = grep.missing.load(Ordering::Relaxed);
+    let unreadable = grep.unreadable.load(Ordering::Relaxed);
+    if missing > 0 {
+        eprintln!(
+            "csearch: {missing} indexed file(s) no longer exist -- run cindex to refresh the index"
+        );
+    }
+    if unreadable > 0 {
+        eprintln!("csearch: {unreadable} indexed file(s) could not be read");
+    }
     if args.verbose {
         eprintln!("{total} matches in {files} files ({:.2?})", t0.elapsed());
     }
-    if total == 0 {
-        std::process::exit(1);
-    }
-    Ok(())
+    Ok(if total == 0 { 1 } else { 0 })
 }
 
 #[cfg(test)]
@@ -275,6 +311,8 @@ mod tests {
             list,
             names,
             line_numbers,
+            missing: AtomicUsize::new(0),
+            unreadable: AtomicUsize::new(0),
         };
         let (out, n) = g.grep_bytes("f", data);
         (String::from_utf8(out).unwrap(), n)
