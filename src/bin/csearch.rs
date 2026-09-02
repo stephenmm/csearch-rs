@@ -61,19 +61,32 @@ struct Grep {
 }
 
 impl Grep {
-    /// Grep one file; returns its output (empty if no match) and match count.
+    /// Grep one file by name; returns its output (empty if no match) and match count.
     fn file(&self, name: &str) -> (Vec<u8>, usize) {
-        let data = match std::fs::read(name) {
-            Ok(d) => d,
-            Err(_) => return (Vec::new(), 0),
-        };
+        match std::fs::read(name) {
+            Ok(data) => self.grep_bytes(name, &data),
+            Err(_) => (Vec::new(), 0),
+        }
+    }
+
+    /// Grep an in-memory file. At most one hit is counted per line, like
+    /// `grep -c`, and the output is formatted per the flags.
+    fn grep_bytes(&self, name: &str, data: &[u8]) -> (Vec<u8>, usize) {
         let mut out = Vec::new();
         let mut matches = 0usize;
         let mut pos = 0usize;
         let mut line_no = 1usize;
         let mut line_counted_to = 0usize;
-        while pos <= data.len() {
-            let Some(m) = self.re.find_at(&data, pos) else { break };
+        // A file that is empty or ends in '\n' has no line after that final
+        // newline, but the regex engine will still report an empty match
+        // there for patterns like `$`, `^$` or `x*`. Such a match belongs to
+        // a line that does not exist; grep never reports it, so neither do we.
+        let no_line_at_end = data.is_empty() || data.ends_with(b"\n");
+        while pos < data.len() {
+            let Some(m) = self.re.find_at(data, pos) else { break };
+            if no_line_at_end && m.start() >= data.len() {
+                break;
+            }
             let start = memchr::memrchr(b'\n', &data[..m.start()]).map_or(0, |i| i + 1);
             let end = memchr::memchr(b'\n', &data[m.end()..]).map_or(data.len(), |i| m.end() + i);
             matches += 1;
@@ -183,4 +196,67 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grep(pattern: &str, data: &[u8], count: bool, list: bool, names: bool, line_numbers: bool) -> (String, usize) {
+        let re = RegexBuilder::new(pattern).multi_line(true).build().unwrap();
+        let g = Grep { re, count, list, names, line_numbers };
+        let (out, n) = g.grep_bytes("f", data);
+        (String::from_utf8(out).unwrap(), n)
+    }
+
+    fn count(pattern: &str, data: &[u8]) -> usize {
+        grep(pattern, data, true, false, false, false).1
+    }
+
+    #[test]
+    fn no_phantom_line_after_final_newline() {
+        // Regression: the loop ran once more at pos == len, where the engine
+        // reports an empty match after the trailing newline -- a line grep
+        // never sees. Expected values are what `grep -Ec` prints.
+        assert_eq!(count("x*", b"abc\n"), 1);
+        assert_eq!(count("$", b"abc\n"), 1);
+        assert_eq!(count("^$", b"abc\n"), 0);
+        assert_eq!(count("^$", b"a\n\nb\n"), 1);
+        assert_eq!(count("^", b"a\nb\n"), 2);
+        assert_eq!(count("x*", b""), 0);
+        assert_eq!(count("$", b""), 0);
+        // A final line without a newline is still a line.
+        assert_eq!(count("x*", b"abc"), 1);
+        assert_eq!(count("$", b"abc"), 1);
+        assert_eq!(count("c$", b"abc"), 1);
+        assert_eq!(count("^$", b"a\n"), 0);
+    }
+
+    #[test]
+    fn one_hit_per_line() {
+        assert_eq!(count("a", b"aaa\naa\nb\n"), 2);
+        let (out, _) = grep("a", b"aaa\n", false, false, false, false);
+        assert_eq!(out, "aaa\n");
+    }
+
+    #[test]
+    fn output_formats() {
+        let text = b"hit one\nmiss\nmiss\nhit four\n\n\nhit 7, hit again\nmiss\nhit nine";
+        let (out, n) = grep("hit", text, false, false, false, true);
+        assert_eq!(n, 4);
+        assert_eq!(out, "1:hit one\n4:hit four\n7:hit 7, hit again\n9:hit nine\n");
+
+        let (out, _) = grep("hit", b"hit\n", false, false, true, true);
+        assert_eq!(out, "f:1:hit\n");
+
+        let (out, n) = grep("hit", b"hit\nhit\n", true, false, true, false);
+        assert_eq!((out.as_str(), n), ("f:2\n", 2));
+
+        // -l stops at the first hit.
+        let (out, n) = grep("hit", b"hit\nhit\n", false, true, true, false);
+        assert_eq!((out.as_str(), n), ("f\n", 1));
+
+        let (out, n) = grep("zzz", b"hit\n", true, false, true, false);
+        assert_eq!((out.as_str(), n), ("", 0));
+    }
 }
