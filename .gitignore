@@ -26,3 +26,6 @@ temp/
 
 # --- compare harness output ---
 compare_results.md
+
+# --- standalone build output ---
+/dist
