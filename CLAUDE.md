@@ -102,6 +102,25 @@ elevation and keeps Go off C:.
 - Live smoke test on `E:\proj\github\flaskhub`: 732 files indexed (320 skipped)
   in 4.0s, 93,801 trigrams, 3.05 MB index; queries resolve candidates in
   ~350 µs.
+- **Standalone binaries for both platforms, verified 2026-09-01.**
+  `build_standalone.py` (mypy --strict clean) builds both from Windows:
+  Windows `x86_64-pc-windows-msvc` + `-C target-feature=+crt-static` (dumpbin
+  confirms only OS DLL imports -- `VCRUNTIME140.dll` and the `api-ms-win-crt-*`
+  set are gone, so no VC++ redistributable is needed), and Linux
+  `x86_64-unknown-linux-musl` inside WSL Ubuntu (`file` reports `static-pie
+  linked`). Sizes: 0.7/1.9 MB Windows, 1.2/2.7 MB Linux. Output in `dist/`
+  (gitignored). The dependency tree is pure Rust, so the musl build needs
+  neither musl-gcc nor sudo -- only a user-scoped rustup inside WSL, which the
+  script installs if absent.
+- **Cross-platform result parity**: the Linux and Windows binaries indexed the
+  same tree and returned byte-identical per-file counts for 6 patterns
+  (`def `, `return`, `import numpy`, `TODO|FIXME`, a date regexp, `DoP256`) --
+  169/348/40/8/71/15 files. Harness: scratchpad `crossplatform_parity.py`.
+- **CI**: `.github/workflows/build.yml` matrix-builds and tests both targets on
+  real runners (linux ~1m45s, windows ~3m10s), asserts the static property in
+  the job itself (`file | grep static`; dumpbin failing on any CRT import), and
+  uploads `.tar.gz` / `.zip` artifacts. A `v*` tag additionally publishes a
+  GitHub release. First-party actions only, pinned at v7.
 - **Parity against the Go original**: `compare_csearch.py` — 11/11 patterns,
   per-file counts identical, on both `E:\proj\githublaskhub` and `E:\proj`.
   Speed on `E:\proj` (6,022 files): 1.3x-2.4x faster per pattern, 1.85x faster
@@ -115,10 +134,18 @@ elevation and keeps Go off C:.
 
 ## Open questions / TODO
 
-- `setup_csearch.py` installs the binaries to `%USERPROFILE%in` (on C:, already
-  on PATH). Not yet run — the binaries currently only exist in `target/release`.
+- **The release job has never run.** It is gated on a `v*` tag and no tag
+  exists yet, so the `gh release create` path is the one untested part of CI.
+  `git tag v0.1.0 && git push origin v0.1.0` would exercise it.
+- `setup_csearch.py` installs the binaries to `%USERPROFILE%\bin` (on C:, already
+  on PATH). Not yet run -- the binaries currently only exist in `target/release`
+  and `dist/`.
 - No index has been built at the default `%USERPROFILE%\.csearchindex`; all runs
   so far used a scratch `CSEARCHINDEX`.
+- 32-bit is untried, and would regress: the AVX2 kernel is gated on
+  `#[cfg(target_arch = "x86_64")]`, so an `i686-*` build silently falls back to
+  the scalar path and loses the headline performance win. Widen the gate first
+  if a 32-bit target is ever wanted.
 - The original README benchmark table came from a Rust-heavy 41 MB corpus that
   does not exist on this machine; local numbers are in the README's
   "Measured on this machine" section.
