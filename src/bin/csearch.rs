@@ -40,7 +40,9 @@ struct Args {
     #[arg(long)]
     brute: bool,
     /// Print the trigram query and timing to stderr.
-    #[arg(long, short = 'v')]
+    // Deliberately no `-v` alias: to every grep user that means invert-match,
+    // which a trigram index cannot do. An error beats a silent misread.
+    #[arg(long)]
     verbose: bool,
     /// Index file (default: $CSEARCHINDEX or ~/.csearchindex).
     #[arg(long)]
@@ -126,6 +128,16 @@ impl Grep {
     }
 }
 
+/// `csearch ... | head` closes our stdout early. That is the reader being
+/// done, not a failure: exit quietly and successfully, as grep and ripgrep
+/// do, instead of printing "Broken pipe".
+fn quiet_on_closed_pipe(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(0),
+        other => other,
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let t0 = Instant::now();
@@ -185,10 +197,10 @@ fn main() -> Result<()> {
             total += n;
         }
         if !out.is_empty() {
-            w.write_all(out)?;
+            quiet_on_closed_pipe(w.write_all(out))?;
         }
     }
-    w.flush()?;
+    quiet_on_closed_pipe(w.flush())?;
     if args.verbose {
         eprintln!("{total} matches in {files} files ({:.2?})", t0.elapsed());
     }

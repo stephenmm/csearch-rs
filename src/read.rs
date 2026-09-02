@@ -28,7 +28,13 @@ fn rd_u64(b: &[u8], at: usize) -> u64 {
 
 impl Index {
     pub fn open(path: &Path) -> Result<Index> {
-        let f = File::open(path).with_context(|| format!("opening index {}", path.display()))?;
+        let f = match File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                bail!("no index at {} -- run `cindex <dir>` to create one", path.display())
+            }
+            Err(e) => return Err(e).with_context(|| format!("opening index {}", path.display())),
+        };
         // SAFETY: the index file is treated as read-only; concurrent
         // rewrites go through rename, so the mapping stays consistent.
         let map = unsafe { Mmap::map(&f)? };
