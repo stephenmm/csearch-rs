@@ -90,6 +90,42 @@ index build (best): go 0.309s / 5.7 MB   rust 0.327s / 5.8 MB
 Indexing is at parity with Go on one core (the first cut was 2.8× slower —
 the harness caught it); it is the only one of the two that uses more cores.
 
+### Measured on this machine (2026-09-01)
+
+Windows 10, Skylake i7 (8 cpus), Go codesearch v1.2.0, rustc 1.98.0. Corpus
+`E:\proj` — 6,022 files / 720 MB of mixed Python, C++, CUDA and Markdown
+(9.1 MB index). `compare_csearch.py --corpus E:\proj`:
+
+```
+pattern                              go ms (min/med) rust ms (min/med)  speedup  parity
+fn main                               17.0 /    18.7     9.6 /    11.1    1.77x  OK (24 files)
+unsafe impl Send                       9.4 /     9.5     7.2 /     7.7    1.30x  OK (4 files)
+TODO|FIXME                            25.0 /    27.8    13.6 /    14.4    1.83x  OK (178 files)
+foo.*bar                              26.6 /    27.3    12.8 /    14.2    2.07x  OK (101 files)
+hello                                 33.5 /    36.1    15.4 /    17.3    2.17x  OK (72 files)
+Hello.*[Ww]orld                       12.9 /    13.7     9.1 /     9.6    1.41x  OK (28 files)
+^use std::                            20.5 /    23.3    12.0 /    13.6    1.72x  OK (98 files)
+impl<[A-Z]> .* for                     8.7 /    10.1     6.6 /     6.7    1.31x  OK (0 files)
+[0-9]{4}-[0-9]{2}-[0-9]{2}            62.2 /    64.8    31.4 /    33.3    1.98x  OK (178 files)
+-i license                            68.3 /    72.8    33.8 /    36.9    2.02x  OK (647 files)
+-i deprecated                         47.7 /    48.7    19.6 /    23.3    2.43x  OK (225 files)
+
+index build (best): go 1.710s / 9.1 MB   rust 0.924s / 9.3 MB   (1.85x)
+```
+
+**Parity: 11/11 patterns, per-file counts identical to the Go original.**
+
+Speed is lower here than the table above: **1.3x-2.4x, not up to 6x**. The
+difference is corpus composition, not a regression. The 41 MB corpus in the
+first table is Rust-heavy, so its patterns hit large candidate sets (`^use
+std::` matched 295 files there, 98 here; `impl<[A-Z]> .* for ` matched 212
+there, 0 here) and the grep phase — where the SIMD prefilters and rayon
+actually pay — dominates. On this mixed corpus more of each measurement is
+process startup and index load, which compresses the ratio; the floor for a
+zero-candidate query is ~6.6 ms rust vs ~8.7 ms go. Rust was faster on every
+pattern of every run, and indexing is 1.85x faster here because it uses all
+8 cores.
+
 ## Verified
 
 `cargo test` covers the AVX2 kernel against the scalar path, the bitmap dedup

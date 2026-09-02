@@ -83,6 +83,14 @@ toolchain and crate cache are on D:. `target/` on exFAT builds fine.
 Linking uses MSVC Build Tools at `E:\VS\BuildTools`; if a build ever fails to
 find `link.exe`, run it from a `vcvars64.bat` shell.
 
+**Go** (for `compare_csearch.py`) is at `D:\go-sdk\go`, `GOPATH=D:\go`, both
+bin dirs on the user PATH; `go install github.com/google/codesearch/cmd/...`
+put the reference binaries in `D:\goin`. The winget `GoLang.Go` package is
+an **MSI that needs admin** and dies with 1602 (user cancelled) in a
+non-interactive session — use the official portable zip from `go.dev/dl`
+instead (checksum published in `go.dev/dl/?mode=json`), which needs no
+elevation and keeps Go off C:.
+
 ## Status
 
 **Verified on this machine 2026-09-01** (Windows 10, rustc 1.98.0):
@@ -94,6 +102,12 @@ find `link.exe`, run it from a `vcvars64.bat` shell.
 - Live smoke test on `E:\proj\github\flaskhub`: 732 files indexed (320 skipped)
   in 4.0s, 93,801 trigrams, 3.05 MB index; queries resolve candidates in
   ~350 µs.
+- **Parity against the Go original**: `compare_csearch.py` — 11/11 patterns,
+  per-file counts identical, on both `E:\proj\githublaskhub` and `E:\proj`.
+  Speed on `E:\proj` (6,022 files): 1.3x-2.4x faster per pattern, 1.85x faster
+  indexing. Lower than the README's original 1.5x-6x table because that corpus
+  was Rust-heavy with much larger candidate sets — see README for the
+  breakdown. Rust won every pattern of every run.
 - **Parity against `grep -Ec`**: exact per-file count agreement over the .py
   subset for `def `, `return`, `import numpy`, `self\.[a-z_]+ =`, `^from `
   (140/122/39/21/136 files respectively). Harness: `parity.py` pattern, run
@@ -101,11 +115,10 @@ find `link.exe`, run it from a `vcvars64.bat` shell.
 
 ## Open questions / TODO
 
-- Go is not installed, so `compare_csearch.py` cannot run its Go side until
-  `winget install GoLang.Go` (the harness offers to do this). The README's
-  benchmark table was produced elsewhere — re-run the harness here for local
-  numbers.
-- `setup_csearch.py` installs the binaries to `%USERPROFILE%\bin`, which is on
-  C:. That directory is already on PATH. Not yet run.
-- Nothing indexes automatically; the index at `%USERPROFILE%\.csearchindex` has
-  not been created (the smoke test used a scratch `CSEARCHINDEX`).
+- `setup_csearch.py` installs the binaries to `%USERPROFILE%in` (on C:, already
+  on PATH). Not yet run — the binaries currently only exist in `target/release`.
+- No index has been built at the default `%USERPROFILE%\.csearchindex`; all runs
+  so far used a scratch `CSEARCHINDEX`.
+- The original README benchmark table came from a Rust-heavy 41 MB corpus that
+  does not exist on this machine; local numbers are in the README's
+  "Measured on this machine" section.
