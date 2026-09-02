@@ -19,10 +19,10 @@
 //!                "CSRSIDX1"
 //! ```
 
-use crate::paths::canonical_string;
+use crate::paths::{canonical_string, strip_verbatim};
 use crate::trigram::{self, MAX_FILE_LEN};
 use crate::varint;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -113,6 +113,60 @@ pub fn collapse_roots(mut roots: Vec<String>) -> (Vec<String>, Vec<(String, Stri
         }
     }
     (kept, dropped)
+}
+
+/// Compare two root strings the way the index stores them: ignoring a
+/// trailing separator, and case-insensitively on Windows.
+fn same_root(a: &str, b: &str) -> bool {
+    let a = a.trim_end_matches(['/', '\\']);
+    let b = b.trim_end_matches(['/', '\\']);
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// The roots the next build should cover, plus notes for the user.
+#[derive(Debug, Default)]
+pub struct RootPlan {
+    pub roots: Vec<PathBuf>,
+    pub notes: Vec<String>,
+}
+
+/// Work out the root set for a rebuild: the stored roots, minus `remove`,
+/// minus any that no longer exist (noted, not fatal, so one deleted
+/// directory cannot wedge the index), plus `add`. Roots named explicitly in
+/// `add` must exist.
+pub fn resolve_roots(stored: &[String], add: &[PathBuf], remove: &[PathBuf]) -> Result<RootPlan> {
+    let mut plan = RootPlan::default();
+    for p in add {
+        if !p.is_dir() {
+            bail!("{}: not a directory", p.display());
+        }
+    }
+    // A root being removed may itself have vanished, in which case it cannot
+    // be canonicalised; fall back to the string as typed.
+    let removed: Vec<String> = remove
+        .iter()
+        .map(|p| canonical_string(p).unwrap_or_else(|_| strip_verbatim(&p.to_string_lossy())))
+        .collect();
+    for r in &removed {
+        if !stored.iter().any(|s| same_root(s, r)) {
+            plan.notes.push(format!("{r}: not in the index"));
+        }
+    }
+    plan.roots.extend(add.iter().cloned());
+    for s in stored {
+        if removed.iter().any(|r| same_root(s, r)) {
+            plan.notes.push(format!("{s}: removed"));
+        } else if !Path::new(s).is_dir() {
+            plan.notes.push(format!("{s}: no longer exists, dropped from the index"));
+        } else {
+            plan.roots.push(PathBuf::from(s));
+        }
+    }
+    Ok(plan)
 }
 
 /// Collect regular files under `roots` in sorted order with their sizes.
@@ -263,7 +317,35 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
             fs::create_dir_all(parent).ok();
         }
     }
-    let f = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    let off = match write_index_file(&tmp, &root_strs, &names, &postings) {
+        Ok(off) => off,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    if let Err(e) = replace_file(&tmp, out) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.context(format!("installing {}", out.display())));
+    }
+    stats.index_bytes = off;
+
+    if opts.verbose {
+        eprintln!(
+            "cindex: wrote {} ({} bytes, {} files, {} trigrams) in {:.2?}",
+            out.display(),
+            off,
+            names.len(),
+            postings.len(),
+            t0.elapsed()
+        );
+    }
+    Ok(stats)
+}
+
+/// Write the whole index to `tmp`; returns its size in bytes.
+fn write_index_file(tmp: &Path, root_strs: &[String], names: &[String], postings: &[Posting]) -> Result<u64> {
+    let f = File::create(tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let mut w = BufWriter::with_capacity(1 << 20, f);
     let mut off: u64 = 0;
 
@@ -271,7 +353,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
     off += MAGIC.len() as u64;
 
     let paths_off = off;
-    for r in &root_strs {
+    for r in root_strs {
         w.write_all(r.as_bytes())?;
         w.write_all(&[0])?;
         off += r.len() as u64 + 1;
@@ -281,7 +363,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
 
     let names_off = off;
     let mut name_index: Vec<u8> = Vec::with_capacity(names.len() * 4);
-    for n in &names {
+    for n in names {
         name_index.extend_from_slice(&((off - names_off) as u32).to_le_bytes());
         w.write_all(n.as_bytes())?;
         w.write_all(&[0])?;
@@ -294,7 +376,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
 
     let posts_off = off;
     let mut post_index: Vec<u8> = Vec::with_capacity(postings.len() * POST_ENTRY_LEN);
-    for p in &postings {
+    for p in postings {
         post_index.extend_from_slice(&p.trigram.to_le_bytes());
         post_index.extend_from_slice(&p.count.to_le_bytes());
         post_index.extend_from_slice(&(off - posts_off).to_le_bytes());
@@ -314,30 +396,119 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
     w.write_all(TRAILER_MAGIC)?;
     off += TRAILER_LEN as u64;
     w.flush()?;
-    drop(w);
+    Ok(off)
+}
 
-    if out.exists() {
-        fs::remove_file(out).with_context(|| format!("removing old {}", out.display()))?;
+/// Move the finished index from `tmp` into place at `out`, replacing any
+/// existing one without a moment in which no index exists, and without
+/// disturbing readers that still have the old file mapped.
+fn replace_file(tmp: &Path, out: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // rename(2) replaces atomically; existing mappings keep the old inode.
+        fs::rename(tmp, out)?;
     }
-    fs::rename(&tmp, out).with_context(|| format!("renaming into {}", out.display()))?;
-    stats.index_bytes = off;
-
-    if opts.verbose {
-        eprintln!(
-            "cindex: wrote {} ({} bytes, {} files, {} trigrams) in {:.2?}",
-            out.display(),
-            off,
-            names.len(),
-            postings.len(),
-            t0.elapsed()
-        );
+    #[cfg(windows)]
+    {
+        // A mapped file cannot be deleted or overwritten on Windows, but it
+        // can be renamed. Park the old index aside, install the new one, then
+        // delete the parked copy -- or leave it for next time if a reader
+        // still holds it.
+        let old = out.with_extension("old");
+        let _ = fs::remove_file(&old);
+        let had_old = out.is_file();
+        if had_old {
+            fs::rename(out, &old)?;
+        }
+        if let Err(e) = fs::rename(tmp, out) {
+            if had_old {
+                let _ = fs::rename(&old, out);
+            }
+            return Err(e.into());
+        }
+        let _ = fs::remove_file(&old);
     }
-    Ok(stats)
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = fs::remove_file(out);
+        fs::rename(tmp, out)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_roots_tolerates_vanished_and_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = dir.path().join("keep");
+        let add = dir.path().join("add");
+        let gone = dir.path().join("gone");
+        fs::create_dir(&keep).unwrap();
+        fs::create_dir(&add).unwrap();
+        let stored = vec![
+            canonical_string(&keep).unwrap(),
+            strip_verbatim(&gone.to_string_lossy()), // was indexed, then deleted
+        ];
+
+        let plan = resolve_roots(&stored, &[add.clone()], &[]).unwrap();
+        let ends = |s: &str| plan.roots.iter().any(|r| r.to_string_lossy().ends_with(s));
+        assert!(ends("add") && ends("keep") && !ends("gone"), "{:?}", plan.roots);
+        assert!(
+            plan.notes.iter().any(|n| n.contains("gone") && n.contains("no longer exists")),
+            "{:?}",
+            plan.notes
+        );
+
+        let plan = resolve_roots(&stored, &[], &[keep.clone()]).unwrap();
+        assert!(plan.roots.is_empty(), "{:?}", plan.roots);
+        assert!(plan.notes.iter().any(|n| n.ends_with(": removed")), "{:?}", plan.notes);
+
+        // Removing something never indexed is noted, not fatal.
+        let plan = resolve_roots(&stored, &[], &[add.clone()]).unwrap();
+        assert!(plan.notes.iter().any(|n| n.contains("not in the index")), "{:?}", plan.notes);
+
+        // Paths named on the command line must exist.
+        assert!(resolve_roots(&stored, &[gone.clone()], &[]).is_err());
+    }
+
+    #[test]
+    fn rebuild_while_index_is_mapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "first\n").unwrap();
+        let out = dir.path().join("index");
+        build_index(&[root.clone()], &out, &BuildOptions::default()).unwrap();
+
+        // A running csearch holds the index mapped; a rebuild must still
+        // succeed, and the old mapping must stay readable.
+        let held = crate::read::Index::open(&out).unwrap();
+        fs::write(root.join("b.txt"), "second\n").unwrap();
+        build_index(&[root.clone()], &out, &BuildOptions::default()).unwrap();
+
+        assert_eq!(held.num_files(), 1);
+        assert!(held.name(0).ends_with("a.txt"));
+        let fresh = crate::read::Index::open(&out).unwrap();
+        assert_eq!(fresh.num_files(), 2);
+        assert!(!out.with_extension("tmp").exists(), "tmp file left behind");
+    }
+
+    #[test]
+    fn failed_build_leaves_no_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "x\n").unwrap();
+        // The target is a directory, so the final rename cannot succeed.
+        let out = dir.path().join("index");
+        fs::create_dir(&out).unwrap();
+        assert!(build_index(&[root], &out, &BuildOptions::default()).is_err());
+        assert!(!out.with_extension("tmp").exists(), "tmp file left behind");
+        assert!(out.is_dir(), "the directory in the way must be untouched");
+    }
 
     #[test]
     fn within_respects_separators() {

@@ -102,3 +102,73 @@ fn closed_stdout_is_not_an_error() {
     assert!(out.status.success(), "exit status {:?}", out.status);
     assert_eq!(text(&out.stderr).trim(), "", "stderr should be silent");
 }
+
+#[test]
+fn vanished_root_does_not_wedge_the_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let mk = |name: &str| {
+        let d = dir.path().join(name);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("f.txt"), format!("{name} needle\n")).unwrap();
+        d
+    };
+    let (gone, keep, later) = (mk("gone"), mk("keep"), mk("later"));
+    let index = dir.path().join("index");
+    assert!(cindex(&index, &[gone.to_str().unwrap(), keep.to_str().unwrap()]).status.success());
+    fs::remove_dir_all(&gone).unwrap();
+
+    // The original bug: one deleted root made every cindex run fail, even
+    // one that only wanted to add a different path, until --reset.
+    let out = cindex(&index, &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("no longer exists"), "{}", text(&out.stderr));
+    let out = cindex(&index, &[later.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let roots = text(&cindex(&index, &["--list"]).stdout);
+    assert!(!roots.contains("gone") && roots.contains("keep") && roots.contains("later"), "{roots}");
+}
+
+#[test]
+fn remove_drops_a_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let mk = |name: &str| {
+        let d = dir.path().join(name);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("f.txt"), format!("only_in_{name}\n")).unwrap();
+        d
+    };
+    let (a, b) = (mk("a"), mk("b"));
+    let index = dir.path().join("index");
+    assert!(cindex(&index, &[a.to_str().unwrap(), b.to_str().unwrap()]).status.success());
+
+    let out = cindex(&index, &["--remove", a.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let roots = text(&cindex(&index, &["--list"]).stdout);
+    assert_eq!(roots.lines().count(), 1, "{roots}");
+    assert!(roots.contains("b"), "{roots}");
+    assert_eq!(csearch(&index, &["-l", "only_in_a"]).status.code(), Some(1), "removed root still searched");
+    assert!(csearch(&index, &["-l", "only_in_b"]).status.success());
+}
+
+#[test]
+fn corrupt_index_is_reported_not_crashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("f.txt"), "abc\n").unwrap();
+    let index = dir.path().join("index");
+    assert!(cindex(&index, &[root.to_str().unwrap()]).status.success());
+
+    let mut bytes = fs::read(&index).unwrap();
+    let t = bytes.len() - csearch::write::TRAILER_LEN;
+    let bad = (bytes.len() as u64 + 100_000).to_le_bytes();
+    bytes[t + 8..t + 16].copy_from_slice(&bad); // names_off past the end of the file
+    fs::write(&index, &bytes).unwrap();
+
+    let out = csearch(&index, &["abc"]);
+    assert_eq!(out.status.code(), Some(1), "should be an error exit, not an abort: {:?}", out.status);
+    let err = text(&out.stderr);
+    assert!(err.contains("cindex --reset"), "{err}");
+    assert!(!err.contains("panicked"), "{err}");
+}

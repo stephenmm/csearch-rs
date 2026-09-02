@@ -1,18 +1,21 @@
 //! cindex — build the trigram index.
 //!
 //!   cindex [--verbose] [--indexpath FILE] [-j N] [PATH...]
-//!   cindex --list        show indexed roots
-//!   cindex --reset       delete the index
+//!   cindex --remove PATH   drop a root from the index and rebuild
+//!   cindex --list          show indexed roots
+//!   cindex --reset         delete the index
 //!
 //! With paths, they are added to the set of roots and the whole index is
 //! rebuilt (rebuilding is fully parallel, so this is fast). With no paths,
-//! the existing roots are re-indexed.
+//! the existing roots are re-indexed. A stored root that no longer exists is
+//! dropped with a note rather than stopping the build; a root that lies
+//! inside another is ignored so nothing is indexed twice.
 
 use anyhow::{bail, Result};
 use clap::Parser;
 use csearch::paths::default_index_path;
 use csearch::read::Index;
-use csearch::write::{build_index, BuildOptions};
+use csearch::write::{build_index, resolve_roots, BuildOptions};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -24,6 +27,9 @@ struct Args {
     /// Delete the index and exit.
     #[arg(long)]
     reset: bool,
+    /// Drop this root from the index and rebuild (repeatable).
+    #[arg(long, value_name = "PATH")]
+    remove: Vec<PathBuf>,
     /// Print progress and skipped files.
     #[arg(long, short = 'v')]
     verbose: bool,
@@ -64,22 +70,23 @@ fn main() -> Result<()> {
         rayon::ThreadPoolBuilder::new().num_threads(n).build_global()?;
     }
 
-    // Merge requested paths with existing roots.
-    let mut roots: Vec<PathBuf> = args.paths.clone();
-    if let Ok(idx) = Index::open(&index_path) {
-        roots.extend(idx.roots().into_iter().map(PathBuf::from));
+    // Roots already in the index. No index yet is simply an empty set; a
+    // damaged one is an error, so it is never silently rebuilt over.
+    let stored: Vec<String> =
+        if index_path.exists() { Index::open(&index_path)?.roots() } else { Vec::new() };
+    let plan = resolve_roots(&stored, &args.paths, &args.remove)?;
+    for note in &plan.notes {
+        eprintln!("cindex: {note}");
     }
-    if roots.is_empty() {
-        bail!("no paths given and no existing index at {}", index_path.display());
-    }
-    for r in &roots {
-        if !r.is_dir() {
-            bail!("{}: not a directory", r.display());
+    if plan.roots.is_empty() {
+        if stored.is_empty() {
+            bail!("no paths given and no existing index at {}", index_path.display());
         }
+        bail!("no roots left to index; use --reset to delete the index");
     }
 
     let opts = BuildOptions { verbose: args.verbose, batch_bytes: args.batch_mib << 20 };
-    let stats = build_index(&roots, &index_path, &opts)?;
+    let stats = build_index(&plan.roots, &index_path, &opts)?;
     eprintln!(
         "cindex: {} files indexed ({} skipped), {} trigrams, {} posting entries, index {} bytes",
         stats.files_indexed,
