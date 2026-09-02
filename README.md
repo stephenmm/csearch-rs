@@ -137,3 +137,19 @@ identical to `grep -rEc` and to the Go csearch.
 
 - Lives on the E: drive at `E:\proj\csearch-rs` (`/mnt/e/proj/csearch-rs` in WSL).
 - Backed up to a private GitHub repo. Push checkpoints with `/backup` (in Claude Code) or `git push`.
+
+## Licence and attribution
+
+csearch-rs is a Rust port of **Google Code Search**
+([github.com/google/codesearch](https://github.com/google/codesearch)) by Russ
+Cox, and is distributed under the same 3-clause BSD licence as the original.
+The upstream copyright notice is retained in [LICENSE](LICENSE), as that licence
+requires.
+
+`src/regexp.rs` and `src/query.rs` are ports of upstream's `index/regexp.go`;
+the trigram extraction, index format, and the parallel indexing and search
+engines are new work. Every runtime dependency is permissively licensed
+(MIT / Apache-2.0 / Unlicense / Unicode-3.0) -- there is no copyleft anywhere in
+the tree.
+
+This project is not affiliated with or endorsed by Google.

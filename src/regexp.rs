@@ -1,3 +1,10 @@
+// Copyright (c) 2011 The Go Authors. All rights reserved.
+// Copyright (c) 2026 The csearch-rs Authors. All rights reserved.
+//
+// Derived from Russ Cox's Go implementation at
+// https://github.com/google/codesearch. Use of this source code is governed
+// by a BSD-style licence; see the LICENSE file at the repository root.
+
 //! Regular-expression → trigram-query analysis, ported from Russ Cox's
 //! `index/regexp.go` (see "Regular Expression Matching with a Trigram
 //! Index", swtch.com/~rsc/regexp/regexp4.html).

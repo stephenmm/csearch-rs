@@ -85,12 +85,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # BSD-3-Clause condition 2: binaries must ship the notice too.
+          cp LICENSE README.md target/${{ matrix.target }}/release/
           cd target/${{ matrix.target }}/release
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "../../../dist/csearch-rs-${{ matrix.name }}.zip" cindex.exe csearch.exe
+            7z a "../../../dist/csearch-rs-${{ matrix.name }}.zip" \
+              cindex.exe csearch.exe LICENSE README.md
           else
             strip cindex csearch || true
-            tar czf "../../../dist/csearch-rs-${{ matrix.name }}.tar.gz" cindex csearch
+            tar czf "../../../dist/csearch-rs-${{ matrix.name }}.tar.gz" \
+              cindex csearch LICENSE README.md
           fi
 
       - uses: actions/upload-artifact@v7
