@@ -7,8 +7,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: only the release job needs to write. A fork's pull request
+# gets a read-only token regardless, but keeping the default at `read` means a
+# future job cannot quietly inherit write access to the repository.
 permissions:
-  contents: write # needed by the release job to upload assets
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -121,6 +124,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its assets
     steps:
       - uses: actions/checkout@v7
 

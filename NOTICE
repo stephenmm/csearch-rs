@@ -1,0 +1,19 @@
+csearch-rs
+Copyright (c) 2026 The csearch-rs Authors.
+
+This product is a Rust port of Google Code Search
+(https://github.com/google/codesearch) by Russ Cox, and is distributed under
+the same 3-clause BSD licence as the original. The upstream copyright notice
+is retained in the LICENSE file, as that licence requires.
+
+Portions derived from the original:
+
+  src/regexp.rs   port of index/regexp.go (regexp -> trigram query analysis)
+  src/query.rs    port of index/regexp.go's Query type
+
+  Copyright (c) 2011 The Go Authors. All rights reserved.
+
+The trigram extraction, the index format, and the parallel indexing and
+search engines are new work.
+
+This project is not affiliated with, sponsored by, or endorsed by Google.

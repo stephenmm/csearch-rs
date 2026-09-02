@@ -1,5 +1,7 @@
 # csearch-rs
 
+[![build](https://github.com/stephenmm/csearch-rs/actions/workflows/build.yml/badge.svg)](https://github.com/stephenmm/csearch-rs/actions/workflows/build.yml)
+
 A Rust port of Google Code Search (Russ Cox's `codesearch`: `cindex` + `csearch`),
 rebuilt for modern hardware:
 
@@ -29,10 +31,10 @@ On Windows, `setup_csearch.py` builds, tests, and copies them to `%USERPROFILE%\
 ## Use
 
 ```
-cindex E:\proj               # index a tree (adds to existing roots, rebuilds in parallel)
+cindex ~/src                 # index a tree (adds to existing roots, rebuilds in parallel)
 cindex                       # re-index the stored roots
 cindex --list                # show roots
-cindex --remove E:\old\tree  # drop one root and rebuild
+cindex --remove ~/src/old    # drop one root and rebuild
 cindex --reset               # delete the index
 csearch -n 'unsafe impl Send'          # regexp search, line numbers
 csearch -l -f '\.rs$' 'TODO|FIXME'     # file names only, restricted by filename regexp
@@ -92,7 +94,7 @@ src/bin/cindex.rs, src/bin/csearch.rs
 ## Compare against the Go original
 
 ```
-py compare_csearch.py --corpus E:\proj
+py compare_csearch.py --corpus /path/to/some/code
 ```
 
 Finds or installs both implementations (Rust: `cargo build`; Go: `go install
@@ -177,10 +179,10 @@ corpora here, `csearch -c` matched `grep -Ec` per file on every pattern tried,
 and the static Linux and Windows builds return identical results. CI runs the
 suite, rustfmt and clippy (`-D warnings`) on Linux and Windows on every push.
 
-## Notes
+## Contributing
 
-- Lives on the E: drive at `E:\proj\csearch-rs` (`/mnt/e/proj/csearch-rs` in WSL).
-- Backed up to a private GitHub repo. Push checkpoints with `/backup` (in Claude Code) or `git push`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for what CI requires and how the tests
+are organised. Security issues: [SECURITY.md](SECURITY.md).
 
 ## Licence and attribution
 
@@ -188,7 +190,7 @@ csearch-rs is a Rust port of **Google Code Search**
 ([github.com/google/codesearch](https://github.com/google/codesearch)) by Russ
 Cox, and is distributed under the same 3-clause BSD licence as the original.
 The upstream copyright notice is retained in [LICENSE](LICENSE), as that licence
-requires.
+requires; [NOTICE](NOTICE) records which files are derived from it.
 
 `src/regexp.rs` and `src/query.rs` are ports of upstream's `index/regexp.go`;
 the trigram extraction, index format, and the parallel indexing and search

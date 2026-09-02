@@ -1,8 +1,3 @@
-csearch-rs is a Rust port of Google Code Search
-(https://github.com/google/codesearch) and is distributed under the same
-3-clause BSD licence as the original. The upstream copyright notice below is
-retained as that licence requires.
-
 Copyright (c) 2011 The Go Authors. All rights reserved.
 Copyright (c) 2026 The csearch-rs Authors. All rights reserved.
 
