@@ -37,11 +37,10 @@ BINARIES: tuple[str, ...] = ("cindex", "csearch")
 WIN_TARGET = "x86_64-pc-windows-msvc"
 LINUX_TARGET = "x86_64-unknown-linux-musl"
 
-VCVARS_CANDIDATES: tuple[Path, ...] = (
-    Path(r"E:\VS\BuildTools\VC\Auxiliary\Build\vcvars64.bat"),
-    Path(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"),
-    Path(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"),
+VSWHERE = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / (
+    r"Microsoft Visual Studio\Installer\vswhere.exe"
 )
+VCVARS_SUFFIX = Path(r"VC\Auxiliary\Build\vcvars64.bat")
 
 # rustup's officially documented installer (https://rustup.rs), user-scoped, no sudo.
 RUSTUP_SH = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path"
@@ -78,9 +77,34 @@ def to_wsl_path(p: Path) -> str:
 
 
 def find_vcvars() -> Path | None:
-    for candidate in VCVARS_CANDIDATES:
-        if candidate.exists():
-            return candidate
+    """Locate vcvars64.bat wherever Visual Studio happens to be installed.
+
+    vswhere ships with every VS 2017+ installer at a fixed path and reports
+    installations anywhere on disk, including non-default drives, so it is
+    tried first. $CSEARCH_VCVARS overrides everything.
+    """
+    override = os.environ.get("CSEARCH_VCVARS")
+    if override and Path(override).exists():
+        return Path(override)
+
+    if VSWHERE.exists():
+        code, out = run([str(VSWHERE), "-latest", "-products", "*",
+                         "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                         "-property", "installationPath"])
+        if code == 0:
+            for line in out.splitlines():
+                candidate = Path(line.strip()) / VCVARS_SUFFIX
+                if line.strip() and candidate.exists():
+                    return candidate
+
+    program_files = [os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")]
+    for base in program_files:
+        for year in ("2022", "2019"):
+            for edition in ("BuildTools", "Community", "Professional", "Enterprise"):
+                candidate = Path(base) / "Microsoft Visual Studio" / year / edition / VCVARS_SUFFIX
+                if candidate.exists():
+                    return candidate
     return None
 
 
@@ -115,8 +139,10 @@ def build_windows(steps: list[Step]) -> None:
 
     vcvars = find_vcvars()
     if vcvars is None:
-        steps.append(Step(False, "windows: no vcvars64.bat found (MSVC Build Tools missing)"))
+        steps.append(Step(False, "windows: no vcvars64.bat found -- install the MSVC build tools, "
+                                 "or point $CSEARCH_VCVARS at vcvars64.bat"))
         return
+    steps.append(Step(True, f"windows: using {vcvars}"))
 
     env = msvc_env(vcvars)
     if env is None:

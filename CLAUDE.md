@@ -19,16 +19,19 @@ binary/long-line checks, rayon across files for both indexing and grep, and the
 -> trigram query analysis is a full port of Cox's `index/regexp.go` onto the
 `regex-syntax` HIR.
 
-Measured on a 41 MB / 2,482-file corpus: search is 1.5x-6x faster than the Go
-original, indexing is at parity on one core (and is the only one of the two
-that scales across cores).
+Measured against the Go original on a mixed 6,022-file corpus: search is
+1.3x-2.4x faster and indexing 1.85x faster, with per-file match counts
+identical on every pattern tried. See the README for the full table and why a
+Rust-heavy corpus scores higher.
 
 ## Conventions
 
-- This project lives on the **E: drive**: `E:\proj\csearch-rs` (Windows) /
-  `/mnt/e/proj/csearch-rs` (WSL). Keep all files here.
-- Backed by a **private GitHub repo**. Commit at meaningful milestones; push to back up.
-- Line endings are normalized to LF via `.gitattributes` so Windows and WSL git stay in sync.
+- Line endings are normalised to LF via `.gitattributes`, so the repository is
+  identical whether it is checked out on Windows or Unix.
+- Commit at meaningful milestones, one logical change per commit, with the
+  regression test that would have caught the bug in the same commit.
+- `rustfmt` defaults and `clippy -D warnings`; CI enforces both on Linux and
+  Windows before it runs the tests.
 
 ## Key files / layout
 
@@ -41,154 +44,83 @@ src/read.rs      mmap reader, delta-varint posting lists, query evaluation
 src/varint.rs    varint encode/decode
 src/paths.rs     index path resolution ($CSEARCHINDEX or ~/.csearchindex)
 src/bin/cindex.rs, src/bin/csearch.rs
+
 tests/index_roundtrip.rs   end-to-end index + query round trip
+tests/cli.rs               drives the real binaries (roots, exit codes, pipes)
+tests/corruption.rs        every field of an index damaged in turn
+tests/superset.rs          randomised: matches are always candidates
+
 compare_csearch.py         parity + timing harness vs the Go original
-setup_csearch.py           build, test, install to %USERPROFILE%\bin
+build_standalone.py        static binaries for Windows and Linux
+setup_csearch.py           build, test, install to the user's bin directory
 ```
 
 ## How to run
 
 ```
 cargo build --release      # binaries in target/release/{cindex,csearch}
-cargo test                 # AVX2-vs-scalar, dedup, varints, Cox regexp cases, round trip
-py setup_csearch.py        # build + test + install to %USERPROFILE%\bin
-py compare_csearch.py --corpus E:\proj   # parity/timing vs Go csearch
+cargo test                 # the full suite
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+
+CSEARCH_PROP_ITERS=40 cargo test --test superset   # property test, harder
+py compare_csearch.py --corpus /path/to/code       # parity/timing vs Go
+py build_standalone.py                             # static binaries -> dist/
 ```
 
-Index lives at `$CSEARCHINDEX` or `%USERPROFILE%\.csearchindex`. Exit status 1
-when nothing matched, like grep.
-
-## Toolchain on this machine (hard-won — trust this)
-
-Rust lives on **D:** (`D:\rust\.cargo`, `D:\rust\.rustup`), not E: and not C:.
-`CARGO_HOME`/`RUSTUP_HOME` are set as user env vars and `D:\rust\.cargo\bin` is
-on the user PATH. rustc/cargo 1.98.0, host `x86_64-pc-windows-msvc`.
-
-**Do not move CARGO_HOME to E:.** E: is exFAT, whose timestamp epoch starts in
-1980, and crates.io tarballs carry a 1970 mtime — so unpacking any crate dies
-with `failed to set mtime ... The parameter is incorrect. (os error 87)`.
-The same exFAT quirk made rustup itself report the bogus
-`toolchain 'stable-x86_64-pc-windows-msvc' is not installable` even though the
-toolchain was fully extracted and working; both problems vanished on NTFS.
-C: was rejected as the home because it has only ~16 GB free (the toolchain
-alone is 1.3 GB, and the crate cache grows without bound).
-
-The winget `Rustlang.Rustup` install exits 1 partway: it downloads and extracts
-the toolchain but never writes `settings.toml` or creates the proxy shims. Fix
-is `rustup default stable` + `rustup self update` once RUSTUP_HOME is on NTFS.
-
-The project tree itself stays on E: per the global convention; only the
-toolchain and crate cache are on D:. `target/` on exFAT builds fine.
-
-Linking uses MSVC Build Tools at `E:\VS\BuildTools`; if a build ever fails to
-find `link.exe`, run it from a `vcvars64.bat` shell.
-
-**Go** (for `compare_csearch.py`) is at `D:\go-sdk\go`, `GOPATH=D:\go`, both
-bin dirs on the user PATH; `go install github.com/google/codesearch/cmd/...`
-put the reference binaries in `D:\goin`. The winget `GoLang.Go` package is
-an **MSI that needs admin** and dies with 1602 (user cancelled) in a
-non-interactive session — use the official portable zip from `go.dev/dl`
-instead (checksum published in `go.dev/dl/?mode=json`), which needs no
-elevation and keeps Go off C:.
+The index lives at `$CSEARCHINDEX`, else `~/.csearchindex`
+(`%USERPROFILE%\.csearchindex` on Windows). Exit status follows grep: 0
+matched, 1 nothing matched, 2 an error.
 
 ## Status
 
-**Verified on this machine 2026-09-01** (Windows 10, rustc 1.98.0):
+Complete and verified. 37 tests; CI builds and tests on Linux and Windows,
+gating on rustfmt and clippy before the suite.
 
-- `cargo test` — 8/8 pass (7 unit: AVX2-vs-scalar kernel, bitmap dedup vs naive
-  set, varint round trip, Cox regexp cases, case folding, big-class; 1
-  integration: index/query round trip). Clean build, no warnings.
-- `cargo build --release` — clean, ~1m20s.
-- Live smoke test on `E:\proj\github\flaskhub`: 732 files indexed (320 skipped)
-  in 4.0s, 93,801 trigrams, 3.05 MB index; queries resolve candidates in
-  ~350 µs.
-- **Standalone binaries for both platforms, verified 2026-09-01.**
-  `build_standalone.py` (mypy --strict clean) builds both from Windows:
-  Windows `x86_64-pc-windows-msvc` + `-C target-feature=+crt-static` (dumpbin
-  confirms only OS DLL imports -- `VCRUNTIME140.dll` and the `api-ms-win-crt-*`
-  set are gone, so no VC++ redistributable is needed), and Linux
-  `x86_64-unknown-linux-musl` inside WSL Ubuntu (`file` reports `static-pie
-  linked`). Sizes: 0.7/1.9 MB Windows, 1.2/2.7 MB Linux. Output in `dist/`
-  (gitignored). The dependency tree is pure Rust, so the musl build needs
-  neither musl-gcc nor sudo -- only a user-scoped rustup inside WSL, which the
-  script installs if absent.
-- **Cross-platform result parity**: the Linux and Windows binaries indexed the
-  same tree and returned byte-identical per-file counts for 6 patterns
-  (`def `, `return`, `import numpy`, `TODO|FIXME`, a date regexp, `DoP256`) --
-  169/348/40/8/71/15 files. Harness: scratchpad `crossplatform_parity.py`.
-- **CI**: `.github/workflows/build.yml` matrix-builds and tests both targets on
-  real runners (linux ~1m45s, windows ~3m10s), asserts the static property in
-  the job itself (`file | grep static`; dumpbin failing on any CRT import), and
-  uploads `.tar.gz` / `.zip` artifacts. A `v*` tag additionally publishes a
-  GitHub release. First-party actions only, pinned at v7.
-- **Critique fixes landed 2026-09-02** (five commits, one per item): phantom
-  line after a final newline (`^$`/`$`/`x*` over-counted by one; now matches
-  grep, and beats Go on `^$`); nested roots indexed twice (collapsed by
-  containment, stored collapsed); `csearch | head` printed "Broken pipe"
-  (quiet exit 0); `-v` alias removed (the invert-match trap); missing index
-  explains `cindex <dir>`; atomic replace (rename-only on Unix; park-old-then-
-  rename on Windows, proven while an Index holds the old file mapped; tmp
-  cleaned on every failure); every offset and index entry validated on open
-  (corrupt -> clear error, not an abort; other format version explained);
-  vanished stored roots dropped with a note + `--remove PATH`; slot table
-  calloc'd (cindex on 3 files: 71 -> 11 MiB); CRLF-aware `^`/`$`. Tests
-  8 -> 31, incl. tests/cli.rs (drives the real binaries) and
-  tests/corruption.rs. Parity harness 11/11 throughout; clippy back to the
-  two pre-existing lints.
-- **#19 + #21 done 2026-09-02.** `tests/superset.rs` is a deterministic
-  property test: random corpora over a 12-letter alphabet, random patterns
-  from a grammar (lifted substrings, classes, negated class, `.`, all
-  quantifier forms, groups, alternation, anchors, `\b`, `-i`), asserting every
-  real match is an index candidate and that the test is non-vacuous. 8,000
-  checks at `CSEARCH_PROP_ITERS=40`: 77% pruned, 34% matched, zero false
-  negatives. The tree is rustfmt'd (one formatting-only commit) and clippy
-  clean; CI now gates on `cargo fmt --check` (Linux) and `cargo clippy
-  --all-targets -- -D warnings` (both legs, before the tests). Both gates were
-  seen red locally with the exact CI commands before being trusted green.
-  Tests: 32.
-- **#14 done 2026-09-02.** csearch greps candidates in ordered batches of 64
-  and writes each batch while rayon greps the next (rayon::join). Isolated
-  A/B on `csearch .` over flaskhub (245k lines, 33.6 MB out): old 40-75 MiB
-  peak (varies with thread interleaving), new 18.5 MiB, stable. Parity and
-  timings unchanged. Regression test: 300 uneven files, `-l` order and `-c`
-  totals across batches. NOTE both earlier RSS figures (100 and 45 MiB) were
-  measurement artifacts -- see memory `wsl-and-rusage-measurement-gotchas`.
-- **Critique closed out 2026-09-02.** cf0d00a: read/permission errors, an
-  unenterable directory and over-limit files reported without --verbose;
-  over-limit files counted as skipped (the limit is a BuildOptions field so
-  the test uses 16 bytes); csearch reports once when indexed files are
-  missing or unreadable; csearch exits 0/1/2 like grep. daf0b94: `=` pins ->
-  caret ranges (Cargo.lock byte-identical; `--locked` and `+1.75.0 check
-  --locked` verified); README says postings stay in RAM, leads with the
-  measured numbers and labels the author's table as reported. Tests: 37.
-  Every critique item is done; #16 (no incremental indexing) stays a
-  documented design choice.
-- **Parity against the Go original**: `compare_csearch.py` — 11/11 patterns,
-  per-file counts identical, on both `E:\proj\githublaskhub` and `E:\proj`.
-  Speed on `E:\proj` (6,022 files): 1.3x-2.4x faster per pattern, 1.85x faster
-  indexing. Lower than the README's original 1.5x-6x table because that corpus
-  was Rust-heavy with much larger candidate sets — see README for the
-  breakdown. Rust won every pattern of every run.
-- **Parity against `grep -Ec`**: exact per-file count agreement over the .py
-  subset for `def `, `return`, `import numpy`, `self\.[a-z_]+ =`, `^from `
-  (140/122/39/21/136 files respectively). Harness: `parity.py` pattern, run
-  ad hoc — see git history of this file.
+**Correctness.** Per-file match counts are identical to the Go original on
+11/11 patterns across two corpora, and to `grep -Ec` on every pattern tried.
+`tests/superset.rs` checks the guarantee the design rests on -- every file a
+regexp matches is among the candidates the index returns -- over randomised
+corpora and patterns; 8,000 checks have produced no false negatives. The
+static Linux and Windows binaries return byte-identical results on the same
+tree.
+
+**Robustness.** A damaged or truncated index is reported, never a panic: every
+section offset, name-index entry and posting-index entry is validated on open,
+and an index from another format version says so. Index replacement is atomic,
+so a `csearch` running mid-rebuild keeps reading the old file and a failed
+build leaves nothing behind; on Windows a mapped file cannot be deleted, so the
+old index is parked aside and removed afterwards. Roots are collapsed by
+containment, and a stored root that has vanished is dropped with a note instead
+of wedging every future run.
+
+**Behaviour.** Output matches grep where the two overlap: one match counted per
+line, CRLF-aware anchors, no phantom line after a trailing newline, quiet exit
+on a closed pipe. Results stream in ordered batches of 64 rather than being
+buffered whole, which bounds memory and lets the first lines appear before the
+search finishes. Read and permission errors are reported without `--verbose`;
+`csearch` says once if indexed files have since been deleted.
+
+**Distribution.** BSD-3-Clause, matching upstream, with the derivation recorded
+in NOTICE. `build_standalone.py` produces a static-CRT Windows binary (no VC++
+redistributable) and a static musl Linux binary (no glibc floor); a `v*` tag
+publishes both to a GitHub release.
 
 ## Open questions / TODO
 
-- A reader that opens the index without FILE_SHARE_DELETE (Python's open(),
-  some older tools -- not csearch) still blocks a rebuild on Windows. Nothing
-  in user space can move such a file; the failure is now clean (old index
-  intact, no tmp) and the message says to close the other program.
-- `setup_csearch.py` installs the binaries to `%USERPROFILE%\bin` (on C:, already
-  on PATH). Not yet run -- the binaries currently only exist in `target/release`
-  and `dist/`.
-- No index has been built at the default `%USERPROFILE%\.csearchindex`; all runs
-  so far used a scratch `CSEARCHINDEX`.
-- 32-bit is untried, and would regress: the AVX2 kernel is gated on
+- Indexing is a full rebuild of every stored root; there is no incremental
+  merge, so adding one directory to a large index re-walks everything. This is
+  a deliberate trade (it is what makes the parallel, sort-free build possible),
+  not an oversight.
+- Postings are held in memory until the index is written. `--batch-mib` bounds
+  the file buffers, not the postings, so peak memory scales with the corpus's
+  distinct-trigram count. Fine at the sizes tested; a ceiling at very large
+  scale.
+- On Windows, a reader that opens the index without `FILE_SHARE_DELETE`
+  (Python's `open()`, some older tools -- not `csearch`, which shares it) blocks
+  a rebuild. Nothing in user space can move a file held that way; the failure is
+  clean and the message says to close the other program.
+- 32-bit is untried and would regress: the AVX2 kernel is gated on
   `#[cfg(target_arch = "x86_64")]`, so an `i686-*` build silently falls back to
   the scalar path and loses the headline performance win. Widen the gate first
   if a 32-bit target is ever wanted.
-- The original README benchmark table came from a Rust-heavy 41 MB corpus that
-  does not exist on this machine; local numbers are in the README's
-  "Measured on this machine" section.

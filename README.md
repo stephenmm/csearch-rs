@@ -108,9 +108,8 @@ own list (prefix `-i ` for case-insensitive), `--runs N`, `--go-bin DIR`,
 
 ### Measured on this machine (2026-09-01)
 
-Windows 10, Skylake i7 (8 cpus), Go codesearch v1.2.0, rustc 1.98.0. Corpus
-`E:\proj` — 6,022 files / 720 MB of mixed Python, C++, CUDA and Markdown
-(9.1 MB index). `compare_csearch.py --corpus E:\proj`:
+Windows 10, Skylake i7 (8 cpus), Go codesearch v1.2.0, rustc 1.98.0. Corpus:
+6,022 files / 720 MB of mixed Python, C++, CUDA and Markdown, 9.1 MB index.
 
 ```
 pattern                              go ms (min/med) rust ms (min/med)  speedup  parity

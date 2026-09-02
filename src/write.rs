@@ -91,8 +91,8 @@ fn skip_name(name: &str) -> bool {
 }
 
 /// True when `child` is `parent` itself or lies somewhere beneath it. Both
-/// must be canonical path strings; the check is textual, so `E:\proj-other`
-/// is correctly not inside `E:\proj`.
+/// must be canonical path strings; the check is textual, so `C:\code-other`
+/// is correctly not inside `C:\code`.
 fn is_within(child: &str, parent: &str) -> bool {
     if !child.starts_with(parent) {
         return false;
@@ -579,12 +579,12 @@ mod tests {
 
     #[test]
     fn within_respects_separators() {
-        assert!(is_within(r"E:\proj\sub", r"E:\proj"));
+        assert!(is_within(r"C:\code\sub", r"C:\code"));
         assert!(is_within("/home/u/proj/sub", "/home/u/proj"));
-        assert!(is_within(r"E:\proj", r"E:\proj"));
-        assert!(is_within(r"E:\proj", r"E:\")); // a drive root ends in a separator
-        assert!(!is_within(r"E:\proj-other", r"E:\proj"));
-        assert!(!is_within(r"E:\pro", r"E:\proj"));
+        assert!(is_within(r"C:\code", r"C:\code"));
+        assert!(is_within(r"C:\code", r"C:\")); // a drive root ends in a separator
+        assert!(!is_within(r"C:\code-other", r"C:\code"));
+        assert!(!is_within(r"E:\pro", r"C:\code"));
         assert!(!is_within("/a", "/a/b"));
     }
 

@@ -1,6 +1,6 @@
 """Compare Google's Go codesearch (cindex/csearch) against csearch-rs.
 
-Run:  py compare_csearch.py --corpus E:\\proj
+Run:  py compare_csearch.py --corpus /path/to/some/code
 
 What it does, fully automated:
   1. Finds (or builds) the Rust binaries in target/release next to this script.
@@ -256,7 +256,9 @@ def load_patterns(path: Path | None) -> list[tuple[str, bool]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--corpus", type=Path, default=None, help="directory to index (default: E:\\proj if present, else the Rust project dir)")
+    ap.add_argument("--corpus", type=Path, default=None,
+                    help="directory to index (default: this project's own tree, which is small -- "
+                         "pass a real corpus for meaningful timings)")
     ap.add_argument("--rust-dir", type=Path, default=SCRIPT_DIR, help="csearch-rs project directory")
     ap.add_argument("--go-bin", type=Path, default=None, help="directory holding the Go cindex/csearch")
     ap.add_argument("--runs", type=int, default=5, help="timed runs per measurement (after one warm-up)")
@@ -266,7 +268,7 @@ def main() -> int:
     args = ap.parse_args()
 
     results: list[str] = []
-    corpus: Path = args.corpus or (Path("E:/proj") if Path("E:/proj").is_dir() else args.rust_dir)
+    corpus: Path = args.corpus or args.rust_dir
     corpus = corpus.resolve()
     if not corpus.is_dir():
         print(f"FAIL: corpus {corpus} is not a directory")
