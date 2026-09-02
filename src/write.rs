@@ -225,10 +225,13 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
     }
 
     let mut names: Vec<String> = Vec::with_capacity(files.len());
-    // Dense trigram -> posting slot map (64 MiB, touched sparsely) replaces a
-    // hash lookup per posting; postings are appended in file-id order so the
-    // lists come out sorted without any global sort.
-    let mut slot: Vec<u32> = vec![u32::MAX; 1 << 24];
+    // Dense trigram -> posting slot map replaces a hash lookup per posting;
+    // postings are appended in file-id order so the lists come out sorted
+    // without any global sort. Entries hold `slot + 1` so that zero means
+    // "unseen": a zero-filled 64 MiB Vec is a calloc whose pages are only
+    // touched for trigrams that actually occur, so a tiny corpus costs a
+    // tiny amount of memory rather than the whole table.
+    let mut slot: Vec<u32> = vec![0; 1 << 24];
     let mut postings: Vec<Posting> = Vec::new();
 
     let mut start = 0usize;
@@ -279,12 +282,12 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
                     stats.posting_entries += tris.len() as u64;
                     for t in tris {
                         let s = slot[t as usize];
-                        let p = if s == u32::MAX {
-                            slot[t as usize] = postings.len() as u32;
+                        let p = if s == 0 {
+                            slot[t as usize] = postings.len() as u32 + 1;
                             postings.push(Posting { trigram: t, ..Default::default() });
                             postings.last_mut().unwrap()
                         } else {
-                            &mut postings[s as usize]
+                            &mut postings[(s - 1) as usize]
                         };
                         p.push(id);
                     }

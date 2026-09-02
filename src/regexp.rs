@@ -362,9 +362,11 @@ fn analyze(hir: &Hir) -> Info {
 
 /// Parse a pattern with the same syntax the `regex` crate uses.
 pub fn parse(pattern: &str, case_insensitive: bool) -> Result<Hir> {
+    // Kept in lockstep with the matcher in csearch, which enables crlf too.
     regex_syntax::ParserBuilder::new()
         .case_insensitive(case_insensitive)
         .multi_line(true)
+        .crlf(true)
         .build()
         .parse(pattern)
         .map_err(|e| anyhow!("bad regexp: {e}"))

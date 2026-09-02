@@ -145,9 +145,12 @@ fn main() -> Result<()> {
         rayon::ThreadPoolBuilder::new().num_threads(n).build_global()?;
     }
 
+    // crlf: `$` must match before "\r\n" as well as "\n", or every
+    // end-of-line anchor silently fails on Windows-edited files.
     let re = RegexBuilder::new(&args.regexp)
         .case_insensitive(args.ignore_case)
         .multi_line(true)
+        .crlf(true)
         .build()
         .with_context(|| format!("bad regexp {:?}", args.regexp))?;
     let file_re = match &args.file_regexp {
@@ -215,7 +218,7 @@ mod tests {
     use super::*;
 
     fn grep(pattern: &str, data: &[u8], count: bool, list: bool, names: bool, line_numbers: bool) -> (String, usize) {
-        let re = RegexBuilder::new(pattern).multi_line(true).build().unwrap();
+        let re = RegexBuilder::new(pattern).multi_line(true).crlf(true).build().unwrap();
         let g = Grep { re, count, list, names, line_numbers };
         let (out, n) = g.grep_bytes("f", data);
         (String::from_utf8(out).unwrap(), n)
@@ -242,6 +245,15 @@ mod tests {
         assert_eq!(count("$", b"abc"), 1);
         assert_eq!(count("c$", b"abc"), 1);
         assert_eq!(count("^$", b"a\n"), 0);
+    }
+
+    #[test]
+    fn crlf_line_endings_anchor_correctly() {
+        // Windows-edited files: `$` must match before "\r\n", as grep does.
+        assert_eq!(count("foo$", b"foo\r\nbar\r\n"), 1);
+        assert_eq!(count("^bar$", b"foo\r\nbar\r\n"), 1);
+        assert_eq!(count("^$", b"a\r\n\r\nb\r\n"), 1);
+        assert_eq!(count("^$", b"a\r\nb\r\n"), 0);
     }
 
     #[test]
