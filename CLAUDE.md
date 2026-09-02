@@ -153,6 +153,16 @@ elevation and keeps Go off C:.
   timings unchanged. Regression test: 300 uneven files, `-l` order and `-c`
   totals across batches. NOTE both earlier RSS figures (100 and 45 MiB) were
   measurement artifacts -- see memory `wsl-and-rusage-measurement-gotchas`.
+- **Critique closed out 2026-09-02.** cf0d00a: read/permission errors, an
+  unenterable directory and over-limit files reported without --verbose;
+  over-limit files counted as skipped (the limit is a BuildOptions field so
+  the test uses 16 bytes); csearch reports once when indexed files are
+  missing or unreadable; csearch exits 0/1/2 like grep. daf0b94: `=` pins ->
+  caret ranges (Cargo.lock byte-identical; `--locked` and `+1.75.0 check
+  --locked` verified); README says postings stay in RAM, leads with the
+  measured numbers and labels the author's table as reported. Tests: 37.
+  Every critique item is done; #16 (no incremental indexing) stays a
+  documented design choice.
 - **Parity against the Go original**: `compare_csearch.py` — 11/11 patterns,
   per-file counts identical, on both `E:\proj\githublaskhub` and `E:\proj`.
   Speed on `E:\proj` (6,022 files): 1.3x-2.4x faster per pattern, 1.85x faster
@@ -166,11 +176,6 @@ elevation and keeps Go off C:.
 
 ## Open questions / TODO
 
-- Remaining critique items, in the order they were ranked: caret version ranges instead of `=` pins; README accuracy ("batch size
-  bounds memory" is only true of file buffers -- postings stay in RAM; the
-  unreproducible 6x table still leads); read/permission errors visible
-  without --verbose; exit 2 for a bad regexp (grep convention); files over
-  1 GiB counted as skipped.
 - A reader that opens the index without FILE_SHARE_DELETE (Python's open(),
   some older tools -- not csearch) still blocks a rebuild on Windows. Nothing
   in user space can move such a file; the failure is now clean (old index
