@@ -210,18 +210,40 @@ ripgrep's reads are nearly free. Cold, the picture changes completely:
 
 Cold, csearch-rs is faster on *every* pattern — including the one it loses on
 warm — because ripgrep must read 1.6 GB from disk while csearch-rs reads a
-175 MB index plus a handful of candidate files. This is the case that matters
-for a tree larger than RAM, which never stays cached.
+175 MB index plus a handful of candidate files.
+
+That gap is not an artifact of slow storage. Measured on the same machine,
+reading many small files cold runs at 24 MB/s against 203 MB/s sequential — 12%
+— because of per-file metadata and seek cost, which is why ripgrep's cold time
+is dominated by first-touch I/O rather than by matching. Any tree larger than
+RAM is permanently in this regime, and even one that fits gets evicted by other
+work.
 
 ### Which to use
 
-**Reach for ripgrep by default.** It needs no index, so it is never stale, it
-honours `.gitignore`, and on a warm tree it is faster for most patterns.
+**For a large tree you search repeatedly, default to csearch-rs.** The wins and
+losses are lopsided: where the index helps it is 4x–32x faster, where it hurts
+it is 2x–3x slower, and the cases where it hurts are mostly patterns returning
+tens of thousands of matches — not searches anyone runs to read the output.
+Cold, it is faster on everything. ripgrep only draws level when the entire tree
+is already sitting in the page cache.
 
-**csearch-rs earns its keep** when you search the same large tree over and over
-with specific patterns — symbol names, error strings, identifiers — or when the
-tree is too big to stay in the page cache. The index costs 21 s and 175 MB for
-the kernel, once.
+**Reach for ripgrep when:**
+
+- **Your pattern has no literal substring in it.** `[0-9]{4}-[0-9]{2}-[0-9]{2}`
+  returns just 1,073 matches on the kernel yet leaves 24% of files as
+  candidates, and runs at 0.35x. Character classes and bare quantifiers give the
+  index nothing to prune with, so you pay for it and grep most of the tree
+  anyway. This is a real query shape, not a straw man.
+- **You have just edited files.** csearch-rs answers from the last `cindex` run;
+  ripgrep reads what is on disk now. That is a correctness difference rather
+  than a speed one, and it is the strongest reason to keep ripgrep to hand.
+- **The tree is small, or you will search it once.** Below a few hundred MB both
+  finish fast enough that maintaining an index is not worth the trouble, and
+  ripgrep needs no setup at all.
+
+The index costs 21 s and 175 MB for the kernel, paid once and reused by every
+search until the files change.
 
 One caveat when comparing results: the two do not search identical file sets.
 csearch-rs omits files it declined to index — very long lines, more than 20,000
