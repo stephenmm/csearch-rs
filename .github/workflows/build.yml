@@ -1,0 +1,124 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed by the release job to upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl links fully static: no glibc version floor, runs on any distro.
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            rustflags: ""
+          # +crt-static drops the VC++ redistributable dependency.
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: "-C target-feature=+crt-static"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Test
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: Build
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Assert the binaries really are standalone, rather than trusting the flag.
+      - name: Verify static (linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cd target/${{ matrix.target }}/release
+          for b in cindex csearch; do
+            file "$b"
+            file "$b" | grep -q 'static-pie linked\|statically linked' \
+              || { echo "FAIL: $b is not statically linked"; exit 1; }
+            ./"$b" --version
+          done
+          echo "PASS: both binaries are statically linked"
+
+      - name: Verify no CRT imports (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+                  -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+                     Where-Object FullName -match 'Hostx64\\x64' | Select-Object -First 1
+          foreach ($b in 'cindex', 'csearch') {
+            $exe = "target/${{ matrix.target }}/release/$b.exe"
+            $out = & $dumpbin.FullName /dependents $exe
+            $crt = $out | Select-String -Pattern 'vcruntime|api-ms-win-crt|msvcp'
+            if ($crt) { Write-Error "FAIL: $b.exe imports the C runtime: $crt" }
+            & $exe --version
+          }
+          Write-Output "PASS: no C-runtime imports"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cd target/${{ matrix.target }}/release
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "../../../dist/csearch-rs-${{ matrix.name }}.zip" cindex.exe csearch.exe
+          else
+            strip cindex csearch || true
+            tar czf "../../../dist/csearch-rs-${{ matrix.name }}.tar.gz" cindex csearch
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: csearch-rs-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "csearch-rs ${GITHUB_REF_NAME}" \
+            --notes "Standalone x86_64 binaries. Linux is static musl (any distro); Windows is static-CRT (no VC++ redistributable)." \
+            --verify-tag
