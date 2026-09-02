@@ -84,6 +84,37 @@ fn skip_name(name: &str) -> bool {
     name.starts_with('.') || name.starts_with('#') || name.starts_with('~') || name.ends_with('~')
 }
 
+/// True when `child` is `parent` itself or lies somewhere beneath it. Both
+/// must be canonical path strings; the check is textual, so `E:\proj-other`
+/// is correctly not inside `E:\proj`.
+fn is_within(child: &str, parent: &str) -> bool {
+    if !child.starts_with(parent) {
+        return false;
+    }
+    if child.len() == parent.len() {
+        return true;
+    }
+    let sep = |c: u8| c == b'/' || c == b'\\';
+    parent.as_bytes().last().is_some_and(|&c| sep(c)) || sep(child.as_bytes()[parent.len()])
+}
+
+/// Sort and dedup roots, dropping any that lie inside another so that no
+/// file is ever indexed (and reported) twice. Returns the kept roots and,
+/// for each dropped one, the root that already covers it.
+pub fn collapse_roots(mut roots: Vec<String>) -> (Vec<String>, Vec<(String, String)>) {
+    roots.sort();
+    roots.dedup();
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropped = Vec::new();
+    for r in roots {
+        match kept.iter().find(|k| is_within(&r, k)) {
+            Some(k) => dropped.push((r, k.clone())),
+            None => kept.push(r),
+        }
+    }
+    (kept, dropped)
+}
+
 /// Collect regular files under `roots` in sorted order with their sizes.
 fn walk(roots: &[String], verbose: bool) -> Vec<(PathBuf, u64)> {
     let mut files = Vec::new();
@@ -128,8 +159,10 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
     for r in roots {
         root_strs.push(canonical_string(r).with_context(|| format!("resolving {}", r.display()))?);
     }
-    root_strs.sort();
-    root_strs.dedup();
+    let (root_strs, dropped) = collapse_roots(root_strs);
+    for (child, parent) in &dropped {
+        eprintln!("cindex: {child} is inside {parent}, not indexing it twice");
+    }
 
     let files = walk(&root_strs, opts.verbose);
     let mut stats = Stats { files_seen: files.len(), ..Default::default() };
@@ -300,4 +333,49 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
         );
     }
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn within_respects_separators() {
+        assert!(is_within(r"E:\proj\sub", r"E:\proj"));
+        assert!(is_within("/home/u/proj/sub", "/home/u/proj"));
+        assert!(is_within(r"E:\proj", r"E:\proj"));
+        assert!(is_within(r"E:\proj", r"E:\")); // a drive root ends in a separator
+        assert!(!is_within(r"E:\proj-other", r"E:\proj"));
+        assert!(!is_within(r"E:\pro", r"E:\proj"));
+        assert!(!is_within("/a", "/a/b"));
+    }
+
+    #[test]
+    fn collapse_drops_nested_roots() {
+        let (kept, dropped) = collapse_roots(vec![
+            "/a/b/c".into(),
+            "/a/b".into(),
+            "/a/bc".into(),
+            "/a/b".into(),
+            "/x".into(),
+        ]);
+        assert_eq!(kept, vec!["/a/b", "/a/bc", "/x"]);
+        assert_eq!(dropped, vec![("/a/b/c".to_string(), "/a/b".to_string())]);
+    }
+
+    #[test]
+    fn nested_root_is_indexed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("a.txt"), "needle\n").unwrap();
+        fs::write(root.join("sub/b.txt"), "needle\n").unwrap();
+        let out = dir.path().join("index");
+        // Adding a subdirectory of an existing root used to index it twice.
+        let stats = build_index(&[root.clone(), root.join("sub")], &out, &BuildOptions::default()).unwrap();
+        assert_eq!(stats.files_indexed, 2);
+        let idx = crate::read::Index::open(&out).unwrap();
+        assert_eq!(idx.roots().len(), 1, "the nested root must not be stored");
+        assert_eq!(idx.posting_count(trigram::pack(b"nee")), 2);
+    }
 }
