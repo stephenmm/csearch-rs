@@ -202,3 +202,50 @@ fn corrupt_index_is_reported_not_crashed() {
     assert!(err.contains("cindex --reset"), "{err}");
     assert!(!err.contains("panicked"), "{err}");
 }
+
+#[test]
+fn output_order_and_totals_survive_chunking() {
+    // Results are grepped in parallel batches and written batch by batch.
+    // 300 matching files span several batches: the output must still be in
+    // index (sorted path) order, complete, and counted correctly -- not in
+    // whatever order the worker threads happened to finish.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    for i in 0..300 {
+        // Uneven sizes so batches finish out of step with each other, kept
+        // under the 2000-byte line limit so every file is indexed.
+        let filler = "x".repeat((i * 37) % 1500);
+        fs::write(
+            root.join(format!("f{i:03}.txt")),
+            format!("{filler}\nneedle {i}\n"),
+        )
+        .unwrap();
+    }
+    let index = dir.path().join("index");
+    assert!(cindex(&index, &[root.to_str().unwrap()]).status.success());
+
+    let out = csearch(&index, &["-l", "needle"]);
+    assert!(out.status.success());
+    let listed: Vec<String> = text(&out.stdout)
+        .lines()
+        .map(|l| {
+            Path::new(l)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let mut sorted = listed.clone();
+    sorted.sort();
+    assert_eq!(listed.len(), 300, "every matching file must be listed");
+    assert_eq!(
+        listed, sorted,
+        "output must be in path order across batches"
+    );
+
+    let out = text(&csearch(&index, &["-c", "-h", "needle"]).stdout);
+    assert_eq!(out.lines().count(), 300);
+    assert!(out.lines().all(|l| l == "1"), "{out}");
+}

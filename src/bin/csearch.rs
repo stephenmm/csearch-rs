@@ -135,6 +135,15 @@ impl Grep {
     }
 }
 
+/// Candidates grepped per parallel batch. Small enough that a batch of
+/// worst-case output stays modest; large enough to keep every core busy.
+const CHUNK: usize = 64;
+
+/// Grep one batch of candidates in parallel; results come back in order.
+fn grep_chunk(grep: &Grep, names: &[&str]) -> Vec<(Vec<u8>, usize)> {
+    names.par_iter().map(|n| grep.file(n)).collect()
+}
+
 /// `csearch ... | head` closes our stdout early. That is the reader being
 /// done, not a failure: exit quietly and successfully, as grep and ripgrep
 /// do, instead of printing "Broken pipe".
@@ -202,20 +211,36 @@ fn main() -> Result<()> {
         line_numbers: args.line_numbers,
     };
 
-    let results: Vec<(Vec<u8>, usize)> = candidates.par_iter().map(|n| grep.file(n)).collect();
-
-    let stdout = io::stdout();
-    let mut w = io::BufWriter::new(stdout.lock());
+    // Grep in chunks, in candidate (path) order, writing each chunk while
+    // rayon greps the next one. Memory is bounded by two chunks of output
+    // rather than every match in the corpus, and the first lines appear as
+    // soon as the first chunk is done -- both matter for `csearch . | head`.
+    // Stdout is not locked across the loop: a lock guard is not Send, and the
+    // writer runs inside rayon::join.
+    let mut w = io::BufWriter::with_capacity(1 << 16, io::stdout());
     let mut total = 0usize;
     let mut files = 0usize;
-    for (out, n) in &results {
-        if *n > 0 {
-            files += 1;
-            total += n;
-        }
-        if !out.is_empty() {
-            quiet_on_closed_pipe(w.write_all(out))?;
-        }
+    let mut chunks = candidates.chunks(CHUNK);
+    let mut pending = chunks.next().map(|c| grep_chunk(&grep, c));
+    while let Some(done) = pending.take() {
+        let next = chunks.next();
+        let (written, following) = rayon::join(
+            || -> io::Result<()> {
+                for (out, n) in &done {
+                    if *n > 0 {
+                        files += 1;
+                        total += n;
+                    }
+                    if !out.is_empty() {
+                        quiet_on_closed_pipe(w.write_all(out))?;
+                    }
+                }
+                Ok(())
+            },
+            || next.map(|c| grep_chunk(&grep, c)),
+        );
+        written?;
+        pending = following;
     }
     quiet_on_closed_pipe(w.flush())?;
     if args.verbose {

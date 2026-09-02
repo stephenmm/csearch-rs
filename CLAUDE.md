@@ -146,6 +146,13 @@ elevation and keeps Go off C:.
   --all-targets -- -D warnings` (both legs, before the tests). Both gates were
   seen red locally with the exact CI commands before being trusted green.
   Tests: 32.
+- **#14 done 2026-09-02.** csearch greps candidates in ordered batches of 64
+  and writes each batch while rayon greps the next (rayon::join). Isolated
+  A/B on `csearch .` over flaskhub (245k lines, 33.6 MB out): old 40-75 MiB
+  peak (varies with thread interleaving), new 18.5 MiB, stable. Parity and
+  timings unchanged. Regression test: 300 uneven files, `-l` order and `-c`
+  totals across batches. NOTE both earlier RSS figures (100 and 45 MiB) were
+  measurement artifacts -- see memory `wsl-and-rusage-measurement-gotchas`.
 - **Parity against the Go original**: `compare_csearch.py` — 11/11 patterns,
   per-file counts identical, on both `E:\proj\githublaskhub` and `E:\proj`.
   Speed on `E:\proj` (6,022 files): 1.3x-2.4x faster per pattern, 1.85x faster
@@ -159,10 +166,7 @@ elevation and keeps Go off C:.
 
 ## Open questions / TODO
 
-- Remaining critique items, in the order they were ranked: streaming output
-  instead of buffering every match (`csearch .` on flaskhub: 245k lines,
-  45 MiB peak);
-  caret version ranges instead of `=` pins; README accuracy ("batch size
+- Remaining critique items, in the order they were ranked: caret version ranges instead of `=` pins; README accuracy ("batch size
   bounds memory" is only true of file buffers -- postings stay in RAM; the
   unreproducible 6x table still leads); read/permission errors visible
   without --verbose; exit 2 for a bad regexp (grep convention); files over

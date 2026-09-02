@@ -60,6 +60,10 @@ Behaviour worth knowing:
 - `^` and `$` honour CRLF line endings, so Windows-edited files anchor the
   same way they do in grep. Matches are counted once per line, and a file's
   final newline does not create a line.
+- Results stream: candidates are grepped in parallel batches of 64 in path
+  order, and each batch is written while the next is grepped, so memory is
+  bounded by two batches of output rather than the whole result and the
+  first lines appear before the search finishes.
 - `csearch pattern | head` exits quietly when the reader goes away.
 - There is no `-v`: it means invert-match everywhere else, which a trigram
   index cannot do. Use `--verbose`.
