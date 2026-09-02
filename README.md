@@ -8,14 +8,16 @@ rebuilt for modern hardware:
 | Trigram extraction | scalar byte loop | AVX2 kernel (8 trigrams/iter, runtime-detected, scalar fallback) |
 | Per-file dedup | sparse set | 16M-bit thread-local bitmap, cleared selectively; only the ≤20k distinct values are sorted |
 | Binary / long-line / UTF-8 checks | byte loop | `memchr` SIMD scans + `std::str::from_utf8` |
-| Indexing | single-threaded, 3-way merge on disk | rayon: parallel file analysis; postings appended via a dense trigram→slot table (no hashing, no global sort); batch size bounds memory |
+| Indexing | single-threaded, 3-way merge on disk | rayon: parallel file analysis; postings appended via a dense trigram→slot table (no hashing, no global sort); batch size bounds the file buffers; postings stay in memory until the index is written (no on-disk merge) |
 | Query analysis | `regexp.go` | full port (exact/prefix/suffix sets, MAX_SET=20, common-trigram factoring) on the `regex-syntax` HIR |
 | Grep phase | sequential, custom RE2-lite | rayon across candidate files; `regex` crate (Teddy/Aho-Corasick SIMD prefilters) |
 | Index format | custom | custom, mmap'd; delta-varint postings, 16-byte binary-searchable posting index |
 
 ## Build
 
-Rust 1.75+ (`Cargo.lock` is pinned to versions that build on 1.75; newer stable works too).
+Rust 1.75 or newer (`rust-version` in Cargo.toml). Dependencies are declared as
+caret ranges; `Cargo.lock` records a set verified to build on 1.75, so build
+with `--locked` for that guarantee, or `cargo update` to take newer fixes.
 
 ```
 cargo build --release
@@ -40,8 +42,8 @@ csearch --verbose 'foo.*bar'           # prints the trigram query + timings
 
 Flags mirror the original (`-c -f -h -i -l -n`); long flags use `--` (`--brute`,
 `--verbose`, `--indexpath`, `-j N` threads). The index lives at `$CSEARCHINDEX`
-or `~/.csearchindex` (`%USERPROFILE%\.csearchindex`). Exit status is 1 when
-nothing matched, like grep.
+or `~/.csearchindex` (`%USERPROFILE%\.csearchindex`). Exit status is 0 when
+something matched, 1 when nothing did, and 2 on an error, like grep.
 
 Skipped files, as in the original: names starting with `.`, `#`, `~` or ending
 in `~`; files containing NUL; invalid UTF-8; lines over 2000 bytes; files with
@@ -65,6 +67,11 @@ Behaviour worth knowing:
   bounded by two batches of output rather than the whole result and the
   first lines appear before the search finishes.
 - `csearch pattern | head` exits quietly when the reader goes away.
+- Read and permission errors, a directory that cannot be entered, and files
+  over the size limit are reported without `--verbose`; the routine skips
+  (binary, invalid UTF-8, long lines, too many trigrams) are listed only with
+  it. `csearch` says once, on stderr, if indexed files no longer exist or
+  cannot be read.
 - There is no `-v`: it means invert-match everywhere else, which a trigram
   index cannot do. Use `--verbose`.
 - Indexing is a full rebuild of every stored root each time; there is no
@@ -97,24 +104,6 @@ identical. Prints a timing table (min / median ms, speedup) and writes
 own list (prefix `-i ` for case-insensitive), `--runs N`, `--go-bin DIR`,
 `--no-build`.
 
-Result on a 41 MB / 2,482-file corpus, single core:
-
-```
-pattern                              go ms (min/med) rust ms (min/med)  speedup  parity
-fn main                               17.7 /    18.1     3.8 /     4.1    4.66x  OK (149 files)
-unsafe impl Send                       2.5 /     3.0     1.7 /     1.8    1.46x  OK (12 files)
-TODO|FIXME                            12.1 /    13.1     3.1 /     3.2    3.91x  OK (165 files)
-foo.*bar                              10.5 /    11.1     3.0 /     3.1    3.47x  OK (91 files)
-^use std::                            21.0 /    21.5     4.6 /     4.7    4.59x  OK (295 files)
-impl<[A-Z]> .* for                    34.7 /    36.7     5.7 /     6.0    6.05x  OK (212 files)
--i deprecated                         29.1 /    31.0     5.8 /     6.4    5.00x  OK (174 files)
-
-index build (best): go 0.309s / 5.7 MB   rust 0.327s / 5.8 MB
-```
-
-Indexing is at parity with Go on one core (the first cut was 2.8× slower —
-the harness caught it); it is the only one of the two that uses more cores.
-
 ### Measured on this machine (2026-09-01)
 
 Windows 10, Skylake i7 (8 cpus), Go codesearch v1.2.0, rustc 1.98.0. Corpus
@@ -139,17 +128,37 @@ index build (best): go 1.710s / 9.1 MB   rust 0.924s / 9.3 MB   (1.85x)
 ```
 
 **Parity: 11/11 patterns, per-file counts identical to the Go original.**
+Rust was faster on every pattern of every run, and indexing is 1.85x faster
+because it uses all 8 cores. On a mixed corpus like this, expect
+**1.3x–2.4x** on search: most of each measurement is process startup and
+index load (the floor for a zero-candidate query is ~6.6 ms rust vs ~8.7 ms
+go), which compresses the ratio.
 
-Speed is lower here than the table above: **1.3x-2.4x, not up to 6x**. The
-difference is corpus composition, not a regression. The 41 MB corpus in the
-first table is Rust-heavy, so its patterns hit large candidate sets (`^use
-std::` matched 295 files there, 98 here; `impl<[A-Z]> .* for ` matched 212
-there, 0 here) and the grep phase — where the SIMD prefilters and rayon
-actually pay — dominates. On this mixed corpus more of each measurement is
-process startup and index load, which compresses the ratio; the floor for a
-zero-candidate query is ~6.6 ms rust vs ~8.7 ms go. Rust was faster on every
-pattern of every run, and indexing is 1.85x faster here because it uses all
-8 cores.
+### The original author's corpus (reported, not reproduced)
+
+The first cut was benchmarked on a 41 MB / 2,482-file, Rust-heavy corpus that
+is not available here, so these numbers are the author's report rather than
+something verified in this repository. They run higher because that corpus
+hits large candidate sets (`^use std::` matched 295 files there against 98
+above; `impl<[A-Z]> .* for ` matched 212 against 0), so the grep phase — where
+the SIMD prefilters and rayon actually pay — dominates:
+
+```
+pattern                              go ms (min/med) rust ms (min/med)  speedup  parity
+fn main                               17.7 /    18.1     3.8 /     4.1    4.66x  OK (149 files)
+unsafe impl Send                       2.5 /     3.0     1.7 /     1.8    1.46x  OK (12 files)
+TODO|FIXME                            12.1 /    13.1     3.1 /     3.2    3.91x  OK (165 files)
+foo.*bar                              10.5 /    11.1     3.0 /     3.1    3.47x  OK (91 files)
+^use std::                            21.0 /    21.5     4.6 /     4.7    4.59x  OK (295 files)
+impl<[A-Z]> .* for                    34.7 /    36.7     5.7 /     6.0    6.05x  OK (212 files)
+-i deprecated                         29.1 /    31.0     5.8 /     6.4    5.00x  OK (174 files)
+
+index build (best): go 0.309s / 5.7 MB   rust 0.327s / 5.8 MB
+```
+
+Indexing was at parity with Go on one core there (the first cut was 2.8×
+slower — the harness caught it); it is the only one of the two that uses more
+cores.
 
 ## Verified
 
@@ -157,10 +166,16 @@ pattern of every run, and indexing is 1.85x faster here because it uses all
 against a naive set, varints, the Cox regexp test cases, an end-to-end
 index/query round trip, the grep loop (line numbers, every output format, CRLF,
 files with and without a final newline), an index damaged in every field, a
-rebuild while the index is mapped, and the real binaries end to end (nested
-roots, vanished roots, `--remove`, a closed pipe, a missing index). On a
-41 MB / 2,482-file corpus, every `csearch -c` result was identical to
-`grep -rEc` and to the Go csearch.
+rebuild while the index is mapped, the real binaries end to end (nested roots,
+vanished roots, `--remove`, a closed pipe, a missing index, exit codes, a
+deleted file, an unreadable file), and a randomised property test that every
+file a regexp matches is among the index's candidates (1,600 checks by
+default, `CSEARCH_PROP_ITERS=40` for 8,000; zero false negatives so far).
+
+Against the Go original, `compare_csearch.py` reports 11/11 parity on two
+corpora here, `csearch -c` matched `grep -Ec` per file on every pattern tried,
+and the static Linux and Windows builds return identical results. CI runs the
+suite, rustfmt and clippy (`-D warnings`) on Linux and Windows on every push.
 
 ## Notes
 
