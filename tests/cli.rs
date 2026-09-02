@@ -263,7 +263,7 @@ fn restore_readable(_: &Path) {}
 #[cfg(unix)]
 fn make_unreadable(path: &Path) -> Option<fs::File> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
     None
 }
 #[cfg(unix)]
