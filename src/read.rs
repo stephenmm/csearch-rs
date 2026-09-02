@@ -40,7 +40,10 @@ impl Index {
         let f = match File::open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                bail!("no index at {} -- run `cindex <dir>` to create one", path.display())
+                bail!(
+                    "no index at {} -- run `cindex <dir>` to create one",
+                    path.display()
+                )
             }
             Err(e) => return Err(e).with_context(|| format!("opening index {}", path.display())),
         };
@@ -89,9 +92,12 @@ impl Index {
         if !ordered {
             return Err(corrupt("section offsets out of order"));
         }
-        let want_posts = (nfiles as usize).checked_mul(4).and_then(|n| n.checked_add(nameidx_off));
-        let want_trailer =
-            (ntrigrams as usize).checked_mul(POST_ENTRY_LEN).and_then(|n| n.checked_add(postidx_off));
+        let want_posts = (nfiles as usize)
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(nameidx_off));
+        let want_trailer = (ntrigrams as usize)
+            .checked_mul(POST_ENTRY_LEN)
+            .and_then(|n| n.checked_add(postidx_off));
         if want_posts != Some(posts_off) || want_trailer != Some(t) {
             return Err(corrupt("section sizes disagree with the file counts"));
         }
@@ -123,7 +129,16 @@ impl Index {
             prev = Some(trigram);
         }
 
-        Ok(Index { map, paths_off, names_off, nameidx_off, posts_off, postidx_off, nfiles, ntrigrams })
+        Ok(Index {
+            map,
+            paths_off,
+            names_off,
+            nameidx_off,
+            posts_off,
+            postidx_off,
+            nfiles,
+            ntrigrams,
+        })
     }
 
     /// Root directories that were indexed.
@@ -132,7 +147,9 @@ impl Index {
         let mut out = Vec::new();
         let mut pos = 0usize;
         while pos < section.len() {
-            let Some(len) = memchr::memchr(0, &section[pos..]) else { break };
+            let Some(len) = memchr::memchr(0, &section[pos..]) else {
+                break;
+            };
             if len == 0 {
                 break;
             }
@@ -172,7 +189,10 @@ impl Index {
             } else if tt > t {
                 hi = mid;
             } else {
-                return Some((rd_u32(&self.map, at + 4), rd_u64(&self.map, at + 8) as usize));
+                return Some((
+                    rd_u32(&self.map, at + 4),
+                    rd_u64(&self.map, at + 8) as usize,
+                ));
             }
         }
         None
@@ -192,7 +212,9 @@ impl Index {
         let mut pos = self.posts_off + off;
         let mut id = 0u32;
         for i in 0..count {
-            let Some(v) = varint::get(postings, &mut pos) else { break };
+            let Some(v) = varint::get(postings, &mut pos) else {
+                break;
+            };
             id = if i == 0 { v } else { id.wrapping_add(v) };
             if id >= self.nfiles {
                 break; // damaged data: stop rather than name a file that does not exist
@@ -217,8 +239,11 @@ impl Index {
             Op::And => {
                 let mut list: Option<Vec<u32>> = restrict.map(<[u32]>::to_vec);
                 // Rarest trigrams first so the candidate set shrinks fastest.
-                let mut tris: Vec<(u32, u32)> =
-                    q.trigrams.iter().map(|&t| (self.posting_count(t), t)).collect();
+                let mut tris: Vec<(u32, u32)> = q
+                    .trigrams
+                    .iter()
+                    .map(|&t| (self.posting_count(t), t))
+                    .collect();
                 tris.sort_unstable();
                 for (_, t) in tris {
                     let p = self.posting_list(t);

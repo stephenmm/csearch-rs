@@ -81,7 +81,9 @@ fn literal(rng: &mut Rng, files: &[Vec<u8>]) -> String {
             return f[start..start + len].iter().map(|&b| b as char).collect();
         }
     }
-    (0..2 + rng.below(4)).map(|_| ALPHABET[rng.below(ALPHABET.len())] as char).collect()
+    (0..2 + rng.below(4))
+        .map(|_| ALPHABET[rng.below(ALPHABET.len())] as char)
+        .collect()
 }
 
 fn atom(rng: &mut Rng, files: &[Vec<u8>], depth: u32) -> String {
@@ -89,8 +91,9 @@ fn atom(rng: &mut Rng, files: &[Vec<u8>], depth: u32) -> String {
         0..=4 => literal(rng, files),
         5 => match rng.below(3) {
             0 => {
-                let letters: String =
-                    (0..2 + rng.below(3)).map(|_| ALPHABET[rng.below(ALPHABET.len())] as char).collect();
+                let letters: String = (0..2 + rng.below(3))
+                    .map(|_| ALPHABET[rng.below(ALPHABET.len())] as char)
+                    .collect();
                 format!("[{letters}]")
             }
             1 => "[a-d]".to_string(),
@@ -107,7 +110,9 @@ fn atom(rng: &mut Rng, files: &[Vec<u8>], depth: u32) -> String {
 }
 
 fn term(rng: &mut Rng, files: &[Vec<u8>], depth: u32) -> String {
-    (0..1 + rng.below(3)).map(|_| atom(rng, files, depth)).collect()
+    (0..1 + rng.below(3))
+        .map(|_| atom(rng, files, depth))
+        .collect()
 }
 
 fn expr(rng: &mut Rng, files: &[Vec<u8>], depth: u32) -> String {
@@ -135,8 +140,10 @@ fn pattern(rng: &mut Rng, files: &[Vec<u8>]) -> (String, bool) {
 
 #[test]
 fn candidates_are_a_superset_of_true_matches() {
-    let corpora: u64 =
-        std::env::var("CSEARCH_PROP_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let corpora: u64 = std::env::var("CSEARCH_PROP_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
     let dir = tempfile::tempdir().unwrap();
     let (mut checks, mut pruned, mut nonempty) = (0usize, 0usize, 0usize);
 
@@ -144,17 +151,27 @@ fn candidates_are_a_superset_of_true_matches() {
         let mut rng = Rng::new(seed);
         let root = dir.path().join(format!("corpus{seed}"));
         fs::create_dir_all(&root).unwrap();
-        let files: Vec<Vec<u8>> = (0..20 + rng.below(30)).map(|_| gen_file(&mut rng)).collect();
+        let files: Vec<Vec<u8>> = (0..20 + rng.below(30))
+            .map(|_| gen_file(&mut rng))
+            .collect();
         for (i, f) in files.iter().enumerate() {
             fs::write(root.join(format!("f{i:03}.txt")), f).unwrap();
         }
         let out = dir.path().join(format!("index{seed}"));
         build_index(std::slice::from_ref(&root), &out, &BuildOptions::default()).unwrap();
         let idx = Index::open(&out).unwrap();
-        assert_eq!(idx.num_files() as usize, files.len(), "seed {seed}: every file should be indexed");
+        assert_eq!(
+            idx.num_files() as usize,
+            files.len(),
+            "seed {seed}: every file should be indexed"
+        );
         let id_of: HashMap<String, u32> = (0..idx.num_files())
             .map(|id| {
-                let base = Path::new(idx.name(id)).file_name().unwrap().to_string_lossy().into_owned();
+                let base = Path::new(idx.name(id))
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
                 (base, id)
             })
             .collect();
@@ -166,7 +183,9 @@ fn candidates_are_a_superset_of_true_matches() {
                 .multi_line(true)
                 .crlf(true)
                 .build()
-                .unwrap_or_else(|e| panic!("seed {seed}: generated an invalid pattern {pat:?}: {e}"));
+                .unwrap_or_else(|e| {
+                    panic!("seed {seed}: generated an invalid pattern {pat:?}: {e}")
+                });
             let query = regexp::regexp_query(&pat, icase)
                 .unwrap_or_else(|e| panic!("seed {seed}: analyser rejected {pat:?}: {e}"));
             let cands = idx.posting_query(&query);
@@ -203,6 +222,12 @@ fn candidates_are_a_superset_of_true_matches() {
     // A superset check passes trivially if the index never prunes or the
     // patterns never match; make sure this test is actually testing something.
     println!("{checks} checks: {pruned} pruned by the index, {nonempty} had real matches");
-    assert!(pruned * 5 > checks, "the index never pruned anything -- the test is vacuous ({pruned}/{checks})");
-    assert!(nonempty * 5 > checks, "patterns rarely matched -- the test is vacuous ({nonempty}/{checks})");
+    assert!(
+        pruned * 5 > checks,
+        "the index never pruned anything -- the test is vacuous ({pruned}/{checks})"
+    );
+    assert!(
+        nonempty * 5 > checks,
+        "patterns rarely matched -- the test is vacuous ({nonempty}/{checks})"
+    );
 }

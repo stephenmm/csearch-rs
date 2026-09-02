@@ -14,7 +14,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
-#[command(name = "csearch", version, about = "Search code with a trigram index", disable_help_flag = true)]
+#[command(
+    name = "csearch",
+    version,
+    about = "Search code with a trigram index",
+    disable_help_flag = true
+)]
 struct Args {
     #[arg(long = "help", action = ArgAction::Help, help = "Print help")]
     help: Option<bool>,
@@ -85,7 +90,9 @@ impl Grep {
         // a line that does not exist; grep never reports it, so neither do we.
         let no_line_at_end = data.is_empty() || data.ends_with(b"\n");
         while pos < data.len() {
-            let Some(m) = self.re.find_at(data, pos) else { break };
+            let Some(m) = self.re.find_at(data, pos) else {
+                break;
+            };
             if no_line_at_end && m.start() >= data.len() {
                 break;
             }
@@ -142,7 +149,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let t0 = Instant::now();
     if let Some(n) = args.threads {
-        rayon::ThreadPoolBuilder::new().num_threads(n).build_global()?;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()?;
     }
 
     // crlf: `$` must match before "\r\n" as well as "\n", or every
@@ -177,7 +186,12 @@ fn main() -> Result<()> {
         .filter(|n| file_re.as_ref().map_or(true, |r| r.is_match(n)))
         .collect();
     if args.verbose {
-        eprintln!("candidates: {} of {} files ({:.2?})", candidates.len(), idx.num_files(), t0.elapsed());
+        eprintln!(
+            "candidates: {} of {} files ({:.2?})",
+            candidates.len(),
+            idx.num_files(),
+            t0.elapsed()
+        );
     }
 
     let grep = Grep {
@@ -217,9 +231,26 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn grep(pattern: &str, data: &[u8], count: bool, list: bool, names: bool, line_numbers: bool) -> (String, usize) {
-        let re = RegexBuilder::new(pattern).multi_line(true).crlf(true).build().unwrap();
-        let g = Grep { re, count, list, names, line_numbers };
+    fn grep(
+        pattern: &str,
+        data: &[u8],
+        count: bool,
+        list: bool,
+        names: bool,
+        line_numbers: bool,
+    ) -> (String, usize) {
+        let re = RegexBuilder::new(pattern)
+            .multi_line(true)
+            .crlf(true)
+            .build()
+            .unwrap();
+        let g = Grep {
+            re,
+            count,
+            list,
+            names,
+            line_numbers,
+        };
         let (out, n) = g.grep_bytes("f", data);
         (String::from_utf8(out).unwrap(), n)
     }
@@ -268,7 +299,10 @@ mod tests {
         let text = b"hit one\nmiss\nmiss\nhit four\n\n\nhit 7, hit again\nmiss\nhit nine";
         let (out, n) = grep("hit", text, false, false, false, true);
         assert_eq!(n, 4);
-        assert_eq!(out, "1:hit one\n4:hit four\n7:hit 7, hit again\n9:hit nine\n");
+        assert_eq!(
+            out,
+            "1:hit one\n4:hit four\n7:hit 7, hit again\n9:hit nine\n"
+        );
 
         let (out, _) = grep("hit", b"hit\n", false, false, true, true);
         assert_eq!(out, "f:1:hit\n");

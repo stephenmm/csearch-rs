@@ -41,10 +41,18 @@ fn nested_roots_do_not_duplicate_results() {
     // every file under it a second time, and csearch printed each twice.
     let out = cindex(&index, &[root.join("sub").to_str().unwrap()]);
     assert!(out.status.success());
-    assert!(text(&out.stderr).contains("not indexing it twice"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("not indexing it twice"),
+        "{}",
+        text(&out.stderr)
+    );
 
     let roots = text(&cindex(&index, &["--list"]).stdout);
-    assert_eq!(roots.lines().count(), 1, "nested root must not be stored: {roots}");
+    assert_eq!(
+        roots.lines().count(),
+        1,
+        "nested root must not be stored: {roots}"
+    );
 
     let out = text(&csearch(&index, &["-c", "needle"]).stdout);
     let lines: Vec<&str> = out.lines().collect();
@@ -114,19 +122,30 @@ fn vanished_root_does_not_wedge_the_index() {
     };
     let (gone, keep, later) = (mk("gone"), mk("keep"), mk("later"));
     let index = dir.path().join("index");
-    assert!(cindex(&index, &[gone.to_str().unwrap(), keep.to_str().unwrap()]).status.success());
+    assert!(
+        cindex(&index, &[gone.to_str().unwrap(), keep.to_str().unwrap()])
+            .status
+            .success()
+    );
     fs::remove_dir_all(&gone).unwrap();
 
     // The original bug: one deleted root made every cindex run fail, even
     // one that only wanted to add a different path, until --reset.
     let out = cindex(&index, &[]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("no longer exists"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no longer exists"),
+        "{}",
+        text(&out.stderr)
+    );
     let out = cindex(&index, &[later.to_str().unwrap()]);
     assert!(out.status.success(), "{}", text(&out.stderr));
 
     let roots = text(&cindex(&index, &["--list"]).stdout);
-    assert!(!roots.contains("gone") && roots.contains("keep") && roots.contains("later"), "{roots}");
+    assert!(
+        !roots.contains("gone") && roots.contains("keep") && roots.contains("later"),
+        "{roots}"
+    );
 }
 
 #[test]
@@ -140,14 +159,20 @@ fn remove_drops_a_root() {
     };
     let (a, b) = (mk("a"), mk("b"));
     let index = dir.path().join("index");
-    assert!(cindex(&index, &[a.to_str().unwrap(), b.to_str().unwrap()]).status.success());
+    assert!(cindex(&index, &[a.to_str().unwrap(), b.to_str().unwrap()])
+        .status
+        .success());
 
     let out = cindex(&index, &["--remove", a.to_str().unwrap()]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let roots = text(&cindex(&index, &["--list"]).stdout);
     assert_eq!(roots.lines().count(), 1, "{roots}");
     assert!(roots.contains("b"), "{roots}");
-    assert_eq!(csearch(&index, &["-l", "only_in_a"]).status.code(), Some(1), "removed root still searched");
+    assert_eq!(
+        csearch(&index, &["-l", "only_in_a"]).status.code(),
+        Some(1),
+        "removed root still searched"
+    );
     assert!(csearch(&index, &["-l", "only_in_b"]).status.success());
 }
 
@@ -167,7 +192,12 @@ fn corrupt_index_is_reported_not_crashed() {
     fs::write(&index, &bytes).unwrap();
 
     let out = csearch(&index, &["abc"]);
-    assert_eq!(out.status.code(), Some(1), "should be an error exit, not an abort: {:?}", out.status);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "should be an error exit, not an abort: {:?}",
+        out.status
+    );
     let err = text(&out.stderr);
     assert!(err.contains("cindex --reset"), "{err}");
     assert!(!err.contains("panicked"), "{err}");

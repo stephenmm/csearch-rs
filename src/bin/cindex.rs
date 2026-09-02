@@ -67,25 +67,36 @@ fn main() -> Result<()> {
     }
 
     if let Some(n) = args.threads {
-        rayon::ThreadPoolBuilder::new().num_threads(n).build_global()?;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()?;
     }
 
     // Roots already in the index. No index yet is simply an empty set; a
     // damaged one is an error, so it is never silently rebuilt over.
-    let stored: Vec<String> =
-        if index_path.exists() { Index::open(&index_path)?.roots() } else { Vec::new() };
+    let stored: Vec<String> = if index_path.exists() {
+        Index::open(&index_path)?.roots()
+    } else {
+        Vec::new()
+    };
     let plan = resolve_roots(&stored, &args.paths, &args.remove)?;
     for note in &plan.notes {
         eprintln!("cindex: {note}");
     }
     if plan.roots.is_empty() {
         if stored.is_empty() {
-            bail!("no paths given and no existing index at {}", index_path.display());
+            bail!(
+                "no paths given and no existing index at {}",
+                index_path.display()
+            );
         }
         bail!("no roots left to index; use --reset to delete the index");
     }
 
-    let opts = BuildOptions { verbose: args.verbose, batch_bytes: args.batch_mib << 20 };
+    let opts = BuildOptions {
+        verbose: args.verbose,
+        batch_bytes: args.batch_mib << 20,
+    };
     let stats = build_index(&plan.roots, &index_path, &opts)?;
     eprintln!(
         "cindex: {} files indexed ({} skipped), {} trigrams, {} posting entries, index {} bytes",

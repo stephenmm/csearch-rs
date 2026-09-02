@@ -45,7 +45,16 @@ fn intact_index_opens() {
 fn truncation_is_reported() {
     let (dir, bytes) = fresh();
     let n = bytes.len();
-    for cut in [0, 5, MAGIC.len(), MAGIC.len() + 10, n / 2, n - TRAILER_LEN - 1, n - 8, n - 1] {
+    for cut in [
+        0,
+        5,
+        MAGIC.len(),
+        MAGIC.len() + 10,
+        n / 2,
+        n - TRAILER_LEN - 1,
+        n - 8,
+        n - 1,
+    ] {
         let err = open_err(&dir, &format!("cut{cut}"), &bytes[..cut]);
         assert!(
             err.contains("cindex --reset") || err.contains("not a csearch-rs index"),
@@ -63,7 +72,10 @@ fn every_trailer_offset_is_validated() {
             let mut b = bytes.clone();
             b[t + field * 8..t + field * 8 + 8].copy_from_slice(&bad.to_le_bytes());
             let err = open_err(&dir, &format!("off{field}_{bad}"), &b);
-            assert!(err.contains("cindex --reset"), "offset {field} = {bad}: {err}");
+            assert!(
+                err.contains("cindex --reset"),
+                "offset {field} = {bad}: {err}"
+            );
         }
     }
 }

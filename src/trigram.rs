@@ -218,8 +218,12 @@ mod tests {
             let b = b"abcdefghij\n"[(x % 11) as usize];
             data.push(b);
         }
-        let naive: Vec<u32> =
-            data.windows(3).map(pack).collect::<BTreeSet<u32>>().into_iter().collect();
+        let naive: Vec<u32> = data
+            .windows(3)
+            .map(pack)
+            .collect::<BTreeSet<u32>>()
+            .into_iter()
+            .collect();
         assert_eq!(analyze(&data).unwrap(), naive);
         // Bitmap must be fully cleared between calls.
         assert_eq!(analyze(b"xyz").unwrap(), vec![pack(b"xyz")]);

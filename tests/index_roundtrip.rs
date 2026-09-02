@@ -12,7 +12,11 @@ fn build_and_query() {
     fs::create_dir_all(root.join("sub")).unwrap();
     fs::write(root.join("a.txt"), "hello world\nfoo bar baz\n").unwrap();
     fs::write(root.join("b.txt"), "goodbye world\n").unwrap();
-    fs::write(root.join("sub/c.rs"), "fn main() { println!(\"hello\"); }\n").unwrap();
+    fs::write(
+        root.join("sub/c.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .unwrap();
     fs::write(root.join("bin.dat"), b"abc\0def").unwrap(); // skipped: NUL
     fs::write(root.join(".hidden"), "hello hidden").unwrap(); // skipped: dotfile
     fs::write(root.join("tiny"), "hi").unwrap(); // indexed, no trigrams
@@ -38,7 +42,11 @@ fn build_and_query() {
     assert!(idx.name(ids[1]).ends_with("c.rs"));
 
     let q = regexp::regexp_query("hello wor", false).unwrap();
-    let files: Vec<&str> = idx.posting_query(&q).into_iter().map(|i| idx.name(i)).collect();
+    let files: Vec<&str> = idx
+        .posting_query(&q)
+        .into_iter()
+        .map(|i| idx.name(i))
+        .collect();
     assert_eq!(files.len(), 1);
     assert!(files[0].ends_with("a.txt"));
 

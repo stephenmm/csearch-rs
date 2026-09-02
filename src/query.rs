@@ -38,15 +38,27 @@ impl Default for Query {
 
 impl Query {
     pub fn all() -> Query {
-        Query { op: Op::All, trigrams: Vec::new(), subs: Vec::new() }
+        Query {
+            op: Op::All,
+            trigrams: Vec::new(),
+            subs: Vec::new(),
+        }
     }
     pub fn none() -> Query {
-        Query { op: Op::None, trigrams: Vec::new(), subs: Vec::new() }
+        Query {
+            op: Op::None,
+            trigrams: Vec::new(),
+            subs: Vec::new(),
+        }
     }
     pub fn and_trigrams(mut trigrams: Vec<u32>) -> Query {
         trigrams.sort_unstable();
         trigrams.dedup();
-        Query { op: Op::And, trigrams, subs: Vec::new() }
+        Query {
+            op: Op::And,
+            trigrams,
+            subs: Vec::new(),
+        }
     }
 
     pub fn and(self, r: Query) -> Query {
@@ -67,7 +79,11 @@ impl Query {
             return self;
         }
         if n == 0 {
-            return if self.op == Op::And { Query::all() } else { Query::none() };
+            return if self.op == Op::And {
+                Query::all()
+            } else {
+                Query::none()
+            };
         }
         if self.subs.len() == 1 {
             return self.subs.pop().unwrap();
@@ -183,10 +199,18 @@ fn and_or(q: Query, r: Query, op: Op) -> Query {
         r.trigrams = rt;
         let inner = and_or(q, r, op);
         let outer = if op == Op::And { Op::Or } else { Op::And };
-        return Query { op: outer, trigrams: common, subs: vec![inner] };
+        return Query {
+            op: outer,
+            trigrams: common,
+            subs: vec![inner],
+        };
     }
 
-    Query { op, trigrams: Vec::new(), subs: vec![q, r] }
+    Query {
+        op,
+        trigrams: Vec::new(),
+        subs: vec![q, r],
+    }
 }
 
 impl fmt::Display for Query {

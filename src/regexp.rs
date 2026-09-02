@@ -89,20 +89,50 @@ struct Info {
 }
 
 fn no_match() -> Info {
-    Info { can_empty: false, exact: None, prefix: vec![], suffix: vec![], m: Query::none() }
+    Info {
+        can_empty: false,
+        exact: None,
+        prefix: vec![],
+        suffix: vec![],
+        m: Query::none(),
+    }
 }
 fn empty_string() -> Info {
-    Info { can_empty: true, exact: Some(vec![vec![]]), prefix: vec![], suffix: vec![], m: Query::all() }
+    Info {
+        can_empty: true,
+        exact: Some(vec![vec![]]),
+        prefix: vec![],
+        suffix: vec![],
+        m: Query::all(),
+    }
 }
 fn any_char() -> Info {
-    Info { can_empty: false, exact: None, prefix: vec![vec![]], suffix: vec![vec![]], m: Query::all() }
+    Info {
+        can_empty: false,
+        exact: None,
+        prefix: vec![vec![]],
+        suffix: vec![vec![]],
+        m: Query::all(),
+    }
 }
 fn any_match() -> Info {
-    Info { can_empty: true, exact: None, prefix: vec![vec![]], suffix: vec![vec![]], m: Query::all() }
+    Info {
+        can_empty: true,
+        exact: None,
+        prefix: vec![vec![]],
+        suffix: vec![vec![]],
+        m: Query::all(),
+    }
 }
 fn literal(bytes: Vec<u8>) -> Info {
     let can_empty = bytes.is_empty();
-    Info { can_empty, exact: Some(vec![bytes]), prefix: vec![], suffix: vec![], m: Query::all() }
+    Info {
+        can_empty,
+        exact: Some(vec![bytes]),
+        prefix: vec![],
+        suffix: vec![],
+        m: Query::all(),
+    }
 }
 
 impl Info {
@@ -144,7 +174,11 @@ impl Info {
     /// most two-byte strings (fewer if it is still too large) and drop
     /// entries made redundant by a shorter prefix/suffix already present.
     fn simplify_set(&mut self, is_prefix: bool) {
-        let mut t = std::mem::take(if is_prefix { &mut self.prefix } else { &mut self.suffix });
+        let mut t = std::mem::take(if is_prefix {
+            &mut self.prefix
+        } else {
+            &mut self.suffix
+        });
         clean(&mut t, !is_prefix);
         self.m = std::mem::take(&mut self.m).and(set_trigrams(&t));
 
@@ -171,7 +205,11 @@ impl Info {
         let mut out: StrSet = Vec::with_capacity(t.len());
         for s in t {
             if let Some(last) = out.last() {
-                let redundant = if is_prefix { s.starts_with(last) } else { s.ends_with(last) };
+                let redundant = if is_prefix {
+                    s.starts_with(last)
+                } else {
+                    s.ends_with(last)
+                };
                 if redundant {
                     continue;
                 }
@@ -234,7 +272,13 @@ fn concat(x: Info, y: Info) -> Info {
 }
 
 fn alternate(mut x: Info, mut y: Info) -> Info {
-    let mut xy = Info { can_empty: false, exact: None, prefix: vec![], suffix: vec![], m: Query::all() };
+    let mut xy = Info {
+        can_empty: false,
+        exact: None,
+        prefix: vec![],
+        suffix: vec![],
+        m: Query::all(),
+    };
     match (&x.exact, &y.exact) {
         (Some(xe), Some(ye)) => xy.exact = Some(union(xe, ye, false)),
         (Some(xe), None) => {
@@ -309,7 +353,13 @@ fn analyze(hir: &Hir) -> Info {
             Some(set) if set.is_empty() => no_match(),
             Some(mut set) => {
                 clean(&mut set, false);
-                Info { can_empty: false, exact: Some(set), prefix: vec![], suffix: vec![], m: Query::all() }
+                Info {
+                    can_empty: false,
+                    exact: Some(set),
+                    prefix: vec![],
+                    suffix: vec![],
+                    m: Query::all(),
+                }
             }
             None => any_char(),
         },
@@ -406,7 +456,10 @@ mod tests {
         assert_eq!(q("def|abc"), "(abc|def)");
         assert_eq!(q("abc|def"), "(abc|def)");
         assert_eq!(q("ab[cde]"), "(abc|abd|abe)");
-        assert_eq!(q("ab[cde]fgh"), "fgh (abc bcf cfg)|(abd bdf dfg)|(abe bef efg)");
+        assert_eq!(
+            q("ab[cde]fgh"),
+            "fgh (abc bcf cfg)|(abd bdf dfg)|(abe bef efg)"
+        );
         assert_eq!(q("."), "+");
         assert_eq!(q("(abc)+"), "abc");
         assert_eq!(q("(abc)*"), "+");

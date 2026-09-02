@@ -44,7 +44,10 @@ pub struct BuildOptions {
 
 impl Default for BuildOptions {
     fn default() -> Self {
-        BuildOptions { verbose: false, batch_bytes: 256 << 20 }
+        BuildOptions {
+            verbose: false,
+            batch_bytes: 256 << 20,
+        }
     }
 }
 
@@ -161,7 +164,8 @@ pub fn resolve_roots(stored: &[String], add: &[PathBuf], remove: &[PathBuf]) -> 
         if removed.iter().any(|r| same_root(s, r)) {
             plan.notes.push(format!("{s}: removed"));
         } else if !Path::new(s).is_dir() {
-            plan.notes.push(format!("{s}: no longer exists, dropped from the index"));
+            plan.notes
+                .push(format!("{s}: no longer exists, dropped from the index"));
         } else {
             plan.roots.push(PathBuf::from(s));
         }
@@ -177,9 +181,7 @@ fn walk(roots: &[String], verbose: bool) -> Vec<(PathBuf, u64)> {
             .follow_links(false)
             .sort_by_file_name()
             .into_iter()
-            .filter_entry(|e| {
-                e.depth() == 0 || !e.file_name().to_str().map_or(false, skip_name)
-            });
+            .filter_entry(|e| e.depth() == 0 || !e.file_name().to_str().map_or(false, skip_name));
         for entry in it {
             let entry = match entry {
                 Ok(e) => e,
@@ -219,9 +221,16 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
     }
 
     let files = walk(&root_strs, opts.verbose);
-    let mut stats = Stats { files_seen: files.len(), ..Default::default() };
+    let mut stats = Stats {
+        files_seen: files.len(),
+        ..Default::default()
+    };
     if opts.verbose {
-        eprintln!("cindex: {} files found in {:.2?}", files.len(), t0.elapsed());
+        eprintln!(
+            "cindex: {} files found in {:.2?}",
+            files.len(),
+            t0.elapsed()
+        );
     }
 
     let mut names: Vec<String> = Vec::with_capacity(files.len());
@@ -284,7 +293,10 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
                         let s = slot[t as usize];
                         let p = if s == 0 {
                             slot[t as usize] = postings.len() as u32 + 1;
-                            postings.push(Posting { trigram: t, ..Default::default() });
+                            postings.push(Posting {
+                                trigram: t,
+                                ..Default::default()
+                            });
                             postings.last_mut().unwrap()
                         } else {
                             &mut postings[(s - 1) as usize]
@@ -347,7 +359,12 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
 }
 
 /// Write the whole index to `tmp`; returns its size in bytes.
-fn write_index_file(tmp: &Path, root_strs: &[String], names: &[String], postings: &[Posting]) -> Result<u64> {
+fn write_index_file(
+    tmp: &Path,
+    root_strs: &[String],
+    names: &[String],
+    postings: &[Posting],
+) -> Result<u64> {
     let f = File::create(tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let mut w = BufWriter::with_capacity(1 << 20, f);
     let mut off: u64 = 0;
@@ -463,20 +480,34 @@ mod tests {
 
         let plan = resolve_roots(&stored, std::slice::from_ref(&add), &[]).unwrap();
         let ends = |s: &str| plan.roots.iter().any(|r| r.to_string_lossy().ends_with(s));
-        assert!(ends("add") && ends("keep") && !ends("gone"), "{:?}", plan.roots);
         assert!(
-            plan.notes.iter().any(|n| n.contains("gone") && n.contains("no longer exists")),
+            ends("add") && ends("keep") && !ends("gone"),
+            "{:?}",
+            plan.roots
+        );
+        assert!(
+            plan.notes
+                .iter()
+                .any(|n| n.contains("gone") && n.contains("no longer exists")),
             "{:?}",
             plan.notes
         );
 
         let plan = resolve_roots(&stored, &[], std::slice::from_ref(&keep)).unwrap();
         assert!(plan.roots.is_empty(), "{:?}", plan.roots);
-        assert!(plan.notes.iter().any(|n| n.ends_with(": removed")), "{:?}", plan.notes);
+        assert!(
+            plan.notes.iter().any(|n| n.ends_with(": removed")),
+            "{:?}",
+            plan.notes
+        );
 
         // Removing something never indexed is noted, not fatal.
         let plan = resolve_roots(&stored, &[], std::slice::from_ref(&add)).unwrap();
-        assert!(plan.notes.iter().any(|n| n.contains("not in the index")), "{:?}", plan.notes);
+        assert!(
+            plan.notes.iter().any(|n| n.contains("not in the index")),
+            "{:?}",
+            plan.notes
+        );
 
         // Paths named on the command line must exist.
         assert!(resolve_roots(&stored, std::slice::from_ref(&gone), &[]).is_err());
@@ -551,7 +582,12 @@ mod tests {
         fs::write(root.join("sub/b.txt"), "needle\n").unwrap();
         let out = dir.path().join("index");
         // Adding a subdirectory of an existing root used to index it twice.
-        let stats = build_index(&[root.clone(), root.join("sub")], &out, &BuildOptions::default()).unwrap();
+        let stats = build_index(
+            &[root.clone(), root.join("sub")],
+            &out,
+            &BuildOptions::default(),
+        )
+        .unwrap();
         assert_eq!(stats.files_indexed, 2);
         let idx = crate::read::Index::open(&out).unwrap();
         assert_eq!(idx.roots().len(), 1, "the nested root must not be stored");
