@@ -2,114 +2,189 @@
 
 [![build](https://github.com/stephenmm/csearch-rs/actions/workflows/build.yml/badge.svg)](https://github.com/stephenmm/csearch-rs/actions/workflows/build.yml)
 
-A Rust port of Google Code Search (Russ Cox's `codesearch`: `cindex` + `csearch`),
-rebuilt for modern hardware:
+**Regular-expression search across a large codebase, fast.** Index the tree
+once; after that every search consults a trigram index to work out the handful
+of files that *could* contain a match, and greps only those.
+
+`grep -r` and `ripgrep` read every file every time. csearch-rs reads a few.
+
+```console
+$ cindex /usr/include
+cindex: 4905 files indexed (5 skipped), 148595 trigrams, 7390023 posting entries, index 10517262 bytes
+
+$ csearch -n 'pthread_mutex_t'
+/usr/include/pthread.h:781:extern int pthread_mutex_init (pthread_mutex_t *__mutex,
+/usr/include/pthread.h:786:extern int pthread_mutex_destroy (pthread_mutex_t *__mutex)
+/usr/include/pthread.h:790:extern int pthread_mutex_trylock (pthread_mutex_t *__mutex)
+...
+```
+
+`--verbose` shows why that is quick — 63 MB of headers, and the regexp only
+had to be run against twelve files:
+
+```console
+$ csearch --verbose 'pthread_mutex_t'
+query: _mu ad_ d_m ead ex_ hre mut pth rea tex thr ute x_t
+candidates: 12 of 4905 files (2.28ms)
+58 matches in 7 files (5.85ms)
+```
+
+The index is built once (1.5 s for those 4,905 files) and reused by every
+search until the files change.
+
+## Install
+
+**Prebuilt binaries** — [latest release](https://github.com/stephenmm/csearch-rs/releases/latest).
+Both are fully static: the Linux build is musl-linked and runs on any x86-64
+distribution, the Windows build needs no Visual C++ redistributable. Unpack
+them anywhere on your `PATH`.
+
+**From source** — Rust 1.75 or newer:
+
+```
+cargo build --release      # target/release/{cindex,csearch}
+```
+
+Dependencies are caret ranges; `Cargo.lock` records a set verified to build on
+1.75, so use `cargo build --locked` if you want exactly that set.
+
+## Using it
+
+### Index a tree — `cindex`
+
+```
+cindex ~/src                 # index a tree (added to any existing roots)
+cindex                       # re-index the roots already stored
+cindex --list                # show the indexed roots
+cindex --remove ~/src/old    # drop one root and rebuild
+cindex --reset               # delete the index
+```
+
+Adding a path indexes it *and* everything already indexed, so the index always
+covers every root you have added. Re-run `cindex` whenever you want results to
+reflect changed files — there is no watcher and no incremental update.
+
+| Flag | Meaning |
+|---|---|
+| `--indexpath FILE` | use a different index file |
+| `-j N` | worker threads (default: all cores) |
+| `--batch-mib N` | source bytes buffered per batch (default 256) |
+| `--verbose` | list every skipped file and progress |
+
+### Search — `csearch`
+
+```
+csearch 'unsafe impl Send'             # plain search
+csearch -n 'fn main'                   # with line numbers
+csearch -l -f '\.rs$' 'TODO|FIXME'     # file names only, limited to .rs files
+csearch -i -c deprecated               # case-insensitive, count per file
+csearch --verbose 'foo.*bar'           # show the trigram query and timings
+```
+
+| Flag | Meaning |
+|---|---|
+| `-c` | print only a count of matching lines per file |
+| `-f REGEXP` | only search files whose *name* matches |
+| `-h` | omit file names from the output |
+| `-i` | case-insensitive |
+| `-l` | print only the names of matching files |
+| `-n` | print line numbers |
+| `--brute` | ignore the index and search every file |
+| `--verbose` | print the trigram query and timings to stderr |
+| `--indexpath FILE` | use a different index file |
+| `-j N` | worker threads (default: all cores) |
+
+Syntax is the [`regex` crate's](https://docs.rs/regex/latest/regex/#syntax) —
+Perl-like, but with no backtracking, so matching is linear-time and cannot blow
+up on a pathological pattern.
+
+The index lives at `$CSEARCHINDEX`, else `~/.csearchindex`
+(`%USERPROFILE%\.csearchindex` on Windows). Exit status follows grep: **0**
+matched, **1** nothing matched, **2** an error.
+
+## Good to know
+
+- **Results reflect the last `cindex` run.** Files edited since then are
+  searched as they were indexed; deleted files are reported once on stderr.
+- **Not everything is indexed.** Skipped, as in the original: names beginning
+  `.`, `#` or `~` or ending in `~`; files containing NUL; invalid UTF-8; lines
+  over 2000 bytes; more than 20,000 distinct trigrams; larger than 1 GiB.
+  Read and permission errors are always reported; the routine skips need
+  `--verbose`.
+- **There is no `-v`.** Everywhere else it means invert-match, which a trigram
+  index fundamentally cannot do — the index finds files that *may* contain a
+  match, not files that do not. Use `--verbose` for verbose output.
+- **Some patterns cannot be narrowed.** `[a-z]+` or `.` yield no usable
+  trigrams, so every file becomes a candidate and the search degrades to a
+  parallel grep. `--verbose` prints `query: +` when that happens.
+- **Output matches grep** where the two overlap: one match counted per line,
+  CRLF-aware `^` and `$`, and no phantom line after a file's final newline.
+- **Results stream** in path order as they are found, so `csearch pattern | head`
+  produces output immediately and exits quietly when the reader goes away.
+- **The index is replaced atomically.** A search running during a rebuild keeps
+  reading the old index; a failed rebuild leaves the previous one intact. A
+  damaged index is reported rather than crashing.
+
+## How it works
+
+A *trigram* is three consecutive bytes. `cindex` records, for every trigram,
+the sorted list of files containing it.
+
+`csearch` compiles your regexp into a boolean query over trigrams — searching
+for `pthread_mutex_t` requires `pth`, `thr`, `hre` … `x_t`, all of them — and
+intersects those posting lists to get a candidate set. Only the candidates are
+then matched with the real regexp. The saving is in what is never read: twelve
+files instead of 4,905 in the example above.
+
+This is Russ Cox's design, described in
+[Regular Expression Matching with a Trigram Index](https://swtch.com/~rsc/regexp/regexp4.html).
+The query analysis here is a direct port of his `index/regexp.go`; the index
+format, the trigram extraction and both engines are new.
+
+```
+src/trigram.rs   AVX2/scalar trigram packing, file validation, dedup
+src/query.rs     boolean trigram Query (And/Or/All/None) + simplification
+src/regexp.rs    regexp -> Query analysis
+src/write.rs     parallel index builder + on-disk format
+src/read.rs      mmap reader, posting lists, query evaluation
+```
+
+## Compared with Google's codesearch
+
+This is a rewrite of [google/codesearch](https://github.com/google/codesearch)
+rather than a translation. The design is the same; the machinery underneath is
+not:
 
 | Piece | Go original | csearch-rs |
 |---|---|---|
-| Trigram extraction | scalar byte loop | AVX2 kernel (8 trigrams/iter, runtime-detected, scalar fallback) |
+| Trigram extraction | scalar byte loop | AVX2 kernel, 8 trigrams/iteration, runtime-detected with a scalar fallback |
 | Per-file dedup | sparse set | 16M-bit thread-local bitmap, cleared selectively; only the ≤20k distinct values are sorted |
 | Binary / long-line / UTF-8 checks | byte loop | `memchr` SIMD scans + `std::str::from_utf8` |
-| Indexing | single-threaded, 3-way merge on disk | rayon: parallel file analysis; postings appended via a dense trigram→slot table (no hashing, no global sort); batch size bounds the file buffers; postings stay in memory until the index is written (no on-disk merge) |
+| Indexing | single-threaded, 3-way merge on disk | rayon across files; postings appended through a dense trigram→slot table (no hashing, no global sort) |
 | Query analysis | `regexp.go` | full port (exact/prefix/suffix sets, MAX_SET=20, common-trigram factoring) on the `regex-syntax` HIR |
-| Grep phase | sequential, custom RE2-lite | rayon across candidate files; `regex` crate (Teddy/Aho-Corasick SIMD prefilters) |
+| Grep phase | sequential, custom RE2-lite | rayon across candidates; the `regex` crate (Teddy/Aho-Corasick SIMD prefilters) |
 | Index format | custom | custom, mmap'd; delta-varint postings, 16-byte binary-searchable posting index |
 
-## Build
+The trade-off: the Go version merges postings on disk and can index
+incrementally, so its memory use is bounded by the merge rather than the
+corpus. This one holds postings in memory until the index is written, and
+rebuilds every root each time.
 
-Rust 1.75 or newer (`rust-version` in Cargo.toml). Dependencies are declared as
-caret ranges; `Cargo.lock` records a set verified to build on 1.75, so build
-with `--locked` for that guarantee, or `cargo update` to take newer fixes.
-
-```
-cargo build --release
-```
-
-Binaries land in `target/release/cindex` and `target/release/csearch`.
-On Windows, `setup_csearch.py` builds, tests, and copies them to `%USERPROFILE%\bin`.
-
-## Use
-
-```
-cindex ~/src                 # index a tree (adds to existing roots, rebuilds in parallel)
-cindex                       # re-index the stored roots
-cindex --list                # show roots
-cindex --remove ~/src/old    # drop one root and rebuild
-cindex --reset               # delete the index
-csearch -n 'unsafe impl Send'          # regexp search, line numbers
-csearch -l -f '\.rs$' 'TODO|FIXME'     # file names only, restricted by filename regexp
-csearch -i -c deprecated               # case-insensitive, count per file
-csearch --verbose 'foo.*bar'           # prints the trigram query + timings
-```
-
-Flags mirror the original (`-c -f -h -i -l -n`); long flags use `--` (`--brute`,
-`--verbose`, `--indexpath`, `-j N` threads). The index lives at `$CSEARCHINDEX`
-or `~/.csearchindex` (`%USERPROFILE%\.csearchindex`). Exit status is 0 when
-something matched, 1 when nothing did, and 2 on an error, like grep.
-
-Skipped files, as in the original: names starting with `.`, `#`, `~` or ending
-in `~`; files containing NUL; invalid UTF-8; lines over 2000 bytes; files with
-more than 20,000 distinct trigrams; files over 1 GiB.
-
-Behaviour worth knowing:
-
-- Roots are collapsed by containment: adding a subdirectory of an indexed
-  tree does not index it twice. A stored root that no longer exists is
-  dropped with a note rather than stopping the build; `--remove` drops one
-  deliberately.
-- The index is replaced atomically. A `csearch` running mid-rebuild keeps
-  reading the old file, and a failed build leaves nothing behind.
-- A damaged or truncated index is reported (run `cindex --reset`), never a
-  crash; so is an index written by another format version.
-- `^` and `$` honour CRLF line endings, so Windows-edited files anchor the
-  same way they do in grep. Matches are counted once per line, and a file's
-  final newline does not create a line.
-- Results stream: candidates are grepped in parallel batches of 64 in path
-  order, and each batch is written while the next is grepped, so memory is
-  bounded by two batches of output rather than the whole result and the
-  first lines appear before the search finishes.
-- `csearch pattern | head` exits quietly when the reader goes away.
-- Read and permission errors, a directory that cannot be entered, and files
-  over the size limit are reported without `--verbose`; the routine skips
-  (binary, invalid UTF-8, long lines, too many trigrams) are listed only with
-  it. `csearch` says once, on stderr, if indexed files no longer exist or
-  cannot be read.
-- There is no `-v`: it means invert-match everywhere else, which a trigram
-  index cannot do. Use `--verbose`.
-- Indexing is a full rebuild of every stored root each time; there is no
-  incremental merge. Results reflect the files as they were at the last
-  `cindex`.
-
-## Layout
-
-```
-src/trigram.rs   AVX2/scalar packing, validation, dedup
-src/query.rs     boolean trigram Query (And/Or/All/None) with simplification
-src/regexp.rs    regexp -> Query analysis (port of index/regexp.go)
-src/write.rs     parallel index builder + on-disk format
-src/read.rs      mmap reader, posting lists, query evaluation
-src/bin/cindex.rs, src/bin/csearch.rs
-```
-
-## Compare against the Go original
+**Results are identical.** `compare_csearch.py` indexes a corpus with both
+implementations and checks that the per-file match counts agree exactly:
 
 ```
 py compare_csearch.py --corpus /path/to/some/code
 ```
 
-Finds or installs both implementations (Rust: `cargo build`; Go: `go install
-github.com/google/codesearch/cmd/...@latest`, or `winget install GoLang.Go`
-first if needed), indexes the corpus with each into temp index files, runs a
-pattern set through `csearch -c` on both, and checks the per-file counts are
-identical. Prints a timing table (min / median ms, speedup) and writes
-`compare_results.md`. Exit code 1 on any mismatch. `--patterns FILE` for your
-own list (prefix `-i ` for case-insensitive), `--runs N`, `--go-bin DIR`,
-`--no-build`.
+It fetches or builds both, runs a pattern set through each, prints a timing
+table and exits non-zero on any mismatch. `--patterns FILE` for your own list,
+`--runs N`, `--go-bin DIR`, `--no-build`.
 
-### Measured on this machine (2026-09-01)
+### Benchmarks
 
-Windows 10, Skylake i7 (8 cpus), Go codesearch v1.2.0, rustc 1.98.0. Corpus:
-6,022 files / 720 MB of mixed Python, C++, CUDA and Markdown, 9.1 MB index.
+Windows 10, Skylake i7 (8 cores), Go codesearch v1.2.0, rustc 1.98.0. Corpus:
+6,022 files / 720 MB of mixed Python, C++, CUDA and Markdown; 9.1 MB index.
 
 ```
 pattern                              go ms (min/med) rust ms (min/med)  speedup  parity
@@ -128,21 +203,21 @@ impl<[A-Z]> .* for                     8.7 /    10.1     6.6 /     6.7    1.31x 
 index build (best): go 1.710s / 9.1 MB   rust 0.924s / 9.3 MB   (1.85x)
 ```
 
-**Parity: 11/11 patterns, per-file counts identical to the Go original.**
-Rust was faster on every pattern of every run, and indexing is 1.85x faster
-because it uses all 8 cores. On a mixed corpus like this, expect
-**1.3x–2.4x** on search: most of each measurement is process startup and
-index load (the floor for a zero-candidate query is ~6.6 ms rust vs ~8.7 ms
-go), which compresses the ratio.
+**11/11 patterns, per-file counts identical to the Go original**, and faster on
+every pattern of every run. Expect **1.3x–2.4x** on search for a corpus like
+this: much of each measurement is process startup and index load — the floor
+for a query with no candidates is ~6.6 ms against ~8.7 ms — which compresses
+the ratio. Indexing is 1.85x faster because it uses every core.
 
-### The original author's corpus (reported, not reproduced)
+<details>
+<summary>The original author's corpus (reported, not reproduced here)</summary>
 
-The first cut was benchmarked on a 41 MB / 2,482-file, Rust-heavy corpus that
-is not available here, so these numbers are the author's report rather than
-something verified in this repository. They run higher because that corpus
-hits large candidate sets (`^use std::` matched 295 files there against 98
-above; `impl<[A-Z]> .* for ` matched 212 against 0), so the grep phase — where
-the SIMD prefilters and rayon actually pay — dominates:
+The first cut was benchmarked on a 41 MB / 2,482-file Rust-heavy corpus that is
+not available in this repository, so these are the author's numbers rather than
+something verified here. They run higher because that corpus hits much larger
+candidate sets (`^use std::` matched 295 files there against 98 above;
+`impl<[A-Z]> .* for ` matched 212 against 0), so the grep phase — where the SIMD
+prefilters and rayon actually pay — dominates.
 
 ```
 pattern                              go ms (min/med) rust ms (min/med)  speedup  parity
@@ -157,44 +232,44 @@ impl<[A-Z]> .* for                    34.7 /    36.7     5.7 /     6.0    6.05x 
 index build (best): go 0.309s / 5.7 MB   rust 0.327s / 5.8 MB
 ```
 
-Indexing was at parity with Go on one core there (the first cut was 2.8×
-slower — the harness caught it); it is the only one of the two that uses more
-cores.
+</details>
 
-## Verified
+## Testing
 
 `cargo test` covers the AVX2 kernel against the scalar path, the bitmap dedup
-against a naive set, varints, the Cox regexp test cases, an end-to-end
+against a naive set, varints, Cox's original regexp test vectors, an end-to-end
 index/query round trip, the grep loop (line numbers, every output format, CRLF,
 files with and without a final newline), an index damaged in every field, a
-rebuild while the index is mapped, the real binaries end to end (nested roots,
-vanished roots, `--remove`, a closed pipe, a missing index, exit codes, a
-deleted file, an unreadable file), and a randomised property test that every
-file a regexp matches is among the index's candidates (1,600 checks by
-default, `CSEARCH_PROP_ITERS=40` for 8,000; zero false negatives so far).
+rebuild while the index is memory-mapped, and the real binaries end to end
+(nested roots, vanished roots, `--remove`, a closed pipe, a missing index, exit
+codes, deleted and unreadable files).
 
-Against the Go original, `compare_csearch.py` reports 11/11 parity on two
-corpora here, `csearch -c` matched `grep -Ec` per file on every pattern tried,
-and the static Linux and Windows builds return identical results. CI runs the
-suite, rustfmt and clippy (`-D warnings`) on Linux and Windows on every push.
+`tests/superset.rs` is a randomised property test of the guarantee the whole
+design rests on: **every file a regexp matches must be among the candidates the
+index returns.** A false negative there would be invisible in normal use — the
+file simply never appears. 8,000 checks over random corpora and patterns have
+produced none. `CSEARCH_PROP_ITERS=40 cargo test --test superset` runs it hard.
+
+Beyond the suite: 11/11 parity with the Go original on two corpora, `csearch -c`
+matching `grep -Ec` per file on every pattern tried, and identical results from
+the static Linux and Windows builds. CI runs the suite, `rustfmt` and
+`clippy -D warnings` on both platforms for every push.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for what CI requires and how the tests
-are organised. Security issues: [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md).
 
 ## Licence and attribution
 
 csearch-rs is a Rust port of **Google Code Search**
 ([github.com/google/codesearch](https://github.com/google/codesearch)) by Russ
 Cox, and is distributed under the same 3-clause BSD licence as the original.
-The upstream copyright notice is retained in [LICENSE](LICENSE), as that licence
+The upstream copyright notice is retained in [LICENSE](LICENSE) as that licence
 requires; [NOTICE](NOTICE) records which files are derived from it.
 
 `src/regexp.rs` and `src/query.rs` are ports of upstream's `index/regexp.go`;
 the trigram extraction, index format, and the parallel indexing and search
 engines are new work. Every runtime dependency is permissively licensed
-(MIT / Apache-2.0 / Unlicense / Unicode-3.0) -- there is no copyleft anywhere in
-the tree.
+(MIT / Apache-2.0 / Unlicense / Unicode-3.0) — there is no copyleft in the tree.
 
 This project is not affiliated with or endorsed by Google.
