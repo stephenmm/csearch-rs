@@ -30,6 +30,7 @@ On Windows, `setup_csearch.py` builds, tests, and copies them to `%USERPROFILE%\
 cindex E:\proj               # index a tree (adds to existing roots, rebuilds in parallel)
 cindex                       # re-index the stored roots
 cindex --list                # show roots
+cindex --remove E:\old\tree  # drop one root and rebuild
 cindex --reset               # delete the index
 csearch -n 'unsafe impl Send'          # regexp search, line numbers
 csearch -l -f '\.rs$' 'TODO|FIXME'     # file names only, restricted by filename regexp
@@ -45,6 +46,26 @@ nothing matched, like grep.
 Skipped files, as in the original: names starting with `.`, `#`, `~` or ending
 in `~`; files containing NUL; invalid UTF-8; lines over 2000 bytes; files with
 more than 20,000 distinct trigrams; files over 1 GiB.
+
+Behaviour worth knowing:
+
+- Roots are collapsed by containment: adding a subdirectory of an indexed
+  tree does not index it twice. A stored root that no longer exists is
+  dropped with a note rather than stopping the build; `--remove` drops one
+  deliberately.
+- The index is replaced atomically. A `csearch` running mid-rebuild keeps
+  reading the old file, and a failed build leaves nothing behind.
+- A damaged or truncated index is reported (run `cindex --reset`), never a
+  crash; so is an index written by another format version.
+- `^` and `$` honour CRLF line endings, so Windows-edited files anchor the
+  same way they do in grep. Matches are counted once per line, and a file's
+  final newline does not create a line.
+- `csearch pattern | head` exits quietly when the reader goes away.
+- There is no `-v`: it means invert-match everywhere else, which a trigram
+  index cannot do. Use `--verbose`.
+- Indexing is a full rebuild of every stored root each time; there is no
+  incremental merge. Results reflect the files as they were at the last
+  `cindex`.
 
 ## Layout
 
@@ -129,9 +150,13 @@ pattern of every run, and indexing is 1.85x faster here because it uses all
 ## Verified
 
 `cargo test` covers the AVX2 kernel against the scalar path, the bitmap dedup
-against a naive set, varints, the Cox regexp test cases, and an end-to-end index/query
-round trip. On a 41 MB / 2,482-file corpus, every `csearch -c` result was
-identical to `grep -rEc` and to the Go csearch.
+against a naive set, varints, the Cox regexp test cases, an end-to-end
+index/query round trip, the grep loop (line numbers, every output format, CRLF,
+files with and without a final newline), an index damaged in every field, a
+rebuild while the index is mapped, and the real binaries end to end (nested
+roots, vanished roots, `--remove`, a closed pipe, a missing index). On a
+41 MB / 2,482-file corpus, every `csearch -c` result was identical to
+`grep -rEc` and to the Go csearch.
 
 ## Notes
 

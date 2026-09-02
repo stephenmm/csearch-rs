@@ -421,7 +421,12 @@ fn replace_file(tmp: &Path, out: &Path) -> Result<()> {
         let _ = fs::remove_file(&old);
         let had_old = out.is_file();
         if had_old {
-            fs::rename(out, &old)?;
+            // Fails only for a reader that opened the file without
+            // FILE_SHARE_DELETE (not csearch, which shares it); nothing in
+            // user space can move such a file, so say what to do.
+            fs::rename(out, &old).context(
+                "another program has the index open in a way that blocks replacing it; close it and re-run",
+            )?;
         }
         if let Err(e) = fs::rename(tmp, out) {
             if had_old {
@@ -456,7 +461,7 @@ mod tests {
             strip_verbatim(&gone.to_string_lossy()), // was indexed, then deleted
         ];
 
-        let plan = resolve_roots(&stored, &[add.clone()], &[]).unwrap();
+        let plan = resolve_roots(&stored, std::slice::from_ref(&add), &[]).unwrap();
         let ends = |s: &str| plan.roots.iter().any(|r| r.to_string_lossy().ends_with(s));
         assert!(ends("add") && ends("keep") && !ends("gone"), "{:?}", plan.roots);
         assert!(
@@ -465,16 +470,16 @@ mod tests {
             plan.notes
         );
 
-        let plan = resolve_roots(&stored, &[], &[keep.clone()]).unwrap();
+        let plan = resolve_roots(&stored, &[], std::slice::from_ref(&keep)).unwrap();
         assert!(plan.roots.is_empty(), "{:?}", plan.roots);
         assert!(plan.notes.iter().any(|n| n.ends_with(": removed")), "{:?}", plan.notes);
 
         // Removing something never indexed is noted, not fatal.
-        let plan = resolve_roots(&stored, &[], &[add.clone()]).unwrap();
+        let plan = resolve_roots(&stored, &[], std::slice::from_ref(&add)).unwrap();
         assert!(plan.notes.iter().any(|n| n.contains("not in the index")), "{:?}", plan.notes);
 
         // Paths named on the command line must exist.
-        assert!(resolve_roots(&stored, &[gone.clone()], &[]).is_err());
+        assert!(resolve_roots(&stored, std::slice::from_ref(&gone), &[]).is_err());
     }
 
     #[test]
@@ -484,13 +489,13 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("a.txt"), "first\n").unwrap();
         let out = dir.path().join("index");
-        build_index(&[root.clone()], &out, &BuildOptions::default()).unwrap();
+        build_index(std::slice::from_ref(&root), &out, &BuildOptions::default()).unwrap();
 
         // A running csearch holds the index mapped; a rebuild must still
         // succeed, and the old mapping must stay readable.
         let held = crate::read::Index::open(&out).unwrap();
         fs::write(root.join("b.txt"), "second\n").unwrap();
-        build_index(&[root.clone()], &out, &BuildOptions::default()).unwrap();
+        build_index(std::slice::from_ref(&root), &out, &BuildOptions::default()).unwrap();
 
         assert_eq!(held.num_files(), 1);
         assert!(held.name(0).ends_with("a.txt"));

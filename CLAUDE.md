@@ -121,6 +121,20 @@ elevation and keeps Go off C:.
   the job itself (`file | grep static`; dumpbin failing on any CRT import), and
   uploads `.tar.gz` / `.zip` artifacts. A `v*` tag additionally publishes a
   GitHub release. First-party actions only, pinned at v7.
+- **Critique fixes landed 2026-09-02** (five commits, one per item): phantom
+  line after a final newline (`^$`/`$`/`x*` over-counted by one; now matches
+  grep, and beats Go on `^$`); nested roots indexed twice (collapsed by
+  containment, stored collapsed); `csearch | head` printed "Broken pipe"
+  (quiet exit 0); `-v` alias removed (the invert-match trap); missing index
+  explains `cindex <dir>`; atomic replace (rename-only on Unix; park-old-then-
+  rename on Windows, proven while an Index holds the old file mapped; tmp
+  cleaned on every failure); every offset and index entry validated on open
+  (corrupt -> clear error, not an abort; other format version explained);
+  vanished stored roots dropped with a note + `--remove PATH`; slot table
+  calloc'd (cindex on 3 files: 71 -> 11 MiB); CRLF-aware `^`/`$`. Tests
+  8 -> 31, incl. tests/cli.rs (drives the real binaries) and
+  tests/corruption.rs. Parity harness 11/11 throughout; clippy back to the
+  two pre-existing lints.
 - **Parity against the Go original**: `compare_csearch.py` — 11/11 patterns,
   per-file counts identical, on both `E:\proj\githublaskhub` and `E:\proj`.
   Speed on `E:\proj` (6,022 files): 1.3x-2.4x faster per pattern, 1.85x faster
@@ -134,9 +148,20 @@ elevation and keeps Go off C:.
 
 ## Open questions / TODO
 
-- **The release job has never run.** It is gated on a `v*` tag and no tag
-  exists yet, so the `gh release create` path is the one untested part of CI.
-  `git tag v0.1.0 && git push origin v0.1.0` would exercise it.
+- Remaining critique items, in the order they were ranked: clippy + rustfmt
+  in CI (2 trivial lints, 27 fmt hunks); a query-evaluation property test
+  (candidates must be a superset of true matches -- the invariant the trigram
+  design promises, currently only smoke-tested); streaming output instead of
+  buffering every match (`csearch .` on flaskhub: 245k lines, 45 MiB peak);
+  caret version ranges instead of `=` pins; README accuracy ("batch size
+  bounds memory" is only true of file buffers -- postings stay in RAM; the
+  unreproducible 6x table still leads); read/permission errors visible
+  without --verbose; exit 2 for a bad regexp (grep convention); files over
+  1 GiB counted as skipped.
+- A reader that opens the index without FILE_SHARE_DELETE (Python's open(),
+  some older tools -- not csearch) still blocks a rebuild on Windows. Nothing
+  in user space can move such a file; the failure is now clean (old index
+  intact, no tmp) and the message says to close the other program.
 - `setup_csearch.py` installs the binaries to `%USERPROFILE%\bin` (on C:, already
   on PATH). Not yet run -- the binaries currently only exist in `target/release`
   and `dist/`.
