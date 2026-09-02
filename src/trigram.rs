@@ -101,7 +101,7 @@ unsafe fn pack_trigrams_avx2(data: &[u8], out: &mut [u32]) {
 thread_local! {
     // 2^24 bits = 2 MiB, one per worker thread, reused across files. Only
     // the bits a file set are cleared afterwards, so small files stay cheap.
-    static BITMAP: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+    static BITMAP: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 const CHUNK: usize = 2048;

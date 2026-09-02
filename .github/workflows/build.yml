@@ -38,6 +38,19 @@ jobs:
       - name: Add target
         run: rustup target add ${{ matrix.target }}
 
+      # Lint before testing so a style or clippy failure surfaces in seconds.
+      # fmt is platform-independent, so once is enough; clippy runs on both
+      # legs because cfg(windows) code is only linted where it compiles.
+      - name: Lint components
+        run: rustup component add clippy rustfmt
+
+      - name: rustfmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Test
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}

@@ -22,7 +22,7 @@ fn build_and_query() {
     fs::write(root.join("tiny"), "hi").unwrap(); // indexed, no trigrams
 
     let out = dir.path().join("index");
-    let stats = build_index(&[root.clone()], &out, &BuildOptions::default()).unwrap();
+    let stats = build_index(std::slice::from_ref(&root), &out, &BuildOptions::default()).unwrap();
     assert_eq!(stats.files_indexed, 4);
     assert_eq!(stats.files_skipped, 1);
 

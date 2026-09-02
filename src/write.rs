@@ -181,7 +181,7 @@ fn walk(roots: &[String], verbose: bool) -> Vec<(PathBuf, u64)> {
             .follow_links(false)
             .sort_by_file_name()
             .into_iter()
-            .filter_entry(|e| e.depth() == 0 || !e.file_name().to_str().map_or(false, skip_name));
+            .filter_entry(|e| e.depth() == 0 || !e.file_name().to_str().is_some_and(skip_name));
         for entry in it {
             let entry = match entry {
                 Ok(e) => e,
