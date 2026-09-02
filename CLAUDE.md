@@ -135,6 +135,17 @@ elevation and keeps Go off C:.
   8 -> 31, incl. tests/cli.rs (drives the real binaries) and
   tests/corruption.rs. Parity harness 11/11 throughout; clippy back to the
   two pre-existing lints.
+- **#19 + #21 done 2026-09-02.** `tests/superset.rs` is a deterministic
+  property test: random corpora over a 12-letter alphabet, random patterns
+  from a grammar (lifted substrings, classes, negated class, `.`, all
+  quantifier forms, groups, alternation, anchors, `\b`, `-i`), asserting every
+  real match is an index candidate and that the test is non-vacuous. 8,000
+  checks at `CSEARCH_PROP_ITERS=40`: 77% pruned, 34% matched, zero false
+  negatives. The tree is rustfmt'd (one formatting-only commit) and clippy
+  clean; CI now gates on `cargo fmt --check` (Linux) and `cargo clippy
+  --all-targets -- -D warnings` (both legs, before the tests). Both gates were
+  seen red locally with the exact CI commands before being trusted green.
+  Tests: 32.
 - **Parity against the Go original**: `compare_csearch.py` — 11/11 patterns,
   per-file counts identical, on both `E:\proj\githublaskhub` and `E:\proj`.
   Speed on `E:\proj` (6,022 files): 1.3x-2.4x faster per pattern, 1.85x faster
@@ -148,11 +159,9 @@ elevation and keeps Go off C:.
 
 ## Open questions / TODO
 
-- Remaining critique items, in the order they were ranked: clippy + rustfmt
-  in CI (2 trivial lints, 27 fmt hunks); a query-evaluation property test
-  (candidates must be a superset of true matches -- the invariant the trigram
-  design promises, currently only smoke-tested); streaming output instead of
-  buffering every match (`csearch .` on flaskhub: 245k lines, 45 MiB peak);
+- Remaining critique items, in the order they were ranked: streaming output
+  instead of buffering every match (`csearch .` on flaskhub: 245k lines,
+  45 MiB peak);
   caret version ranges instead of `=` pins; README accuracy ("batch size
   bounds memory" is only true of file buffers -- postings stay in RAM; the
   unreproducible 6x table still leads); read/permission errors visible
