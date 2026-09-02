@@ -33,7 +33,7 @@ jobs:
             rustflags: "-C target-feature=+crt-static"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Add target
         run: rustup target add ${{ matrix.target }}
@@ -93,7 +93,7 @@ jobs:
             tar czf "../../../dist/csearch-rs-${{ matrix.name }}.tar.gz" cindex csearch
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: csearch-rs-${{ matrix.name }}
           path: dist/*
@@ -105,9 +105,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
