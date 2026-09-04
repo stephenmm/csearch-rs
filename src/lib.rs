@@ -8,6 +8,7 @@
 //!   index to get a small candidate set, then greps those files in parallel
 //!   with the SIMD-accelerated `regex` crate.
 
+pub mod gitstate;
 pub mod paths;
 pub mod query;
 pub mod read;

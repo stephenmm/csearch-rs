@@ -68,9 +68,29 @@ files are never indexed. From then on `cindex` and `csearch` anywhere inside
 that repository use that index with no configuration.
 
 Adding a path to the shared index indexes it *and* everything already there,
-so that index always covers every root you have added. Re-run `cindex`
-whenever you want results to reflect changed files — there is no watcher and
-no incremental update.
+so that index always covers every root you have added.
+
+### Keeping the index fresh
+
+An index reflects the files as they were at the last `cindex`. To stop thinking
+about that in a git repository:
+
+```
+cindex --install-hooks       # build the index now, and refresh it on every git event
+```
+
+That builds the local index and installs `post-checkout`, `post-merge`,
+`post-commit` and `post-rewrite` hooks that each run
+`cindex --local --if-changed --background`. So after any checkout, pull, commit
+or rebase, the index is refreshed — `--if-changed` skips the work when nothing
+moved, and `--background` returns at once so git never waits on it. Foreign
+hooks already present are left untouched; `--uninstall-hooks` removes only the
+ones csearch-rs installed.
+
+Between git events (an uncommitted edit you have not yet searched for), re-run
+`cindex --local` yourself. `csearch` prints a one-line note when a search runs
+against an index whose `HEAD` has moved, so a stale result set is never silently
+trusted.
 
 | Flag | Meaning |
 |---|---|
@@ -81,6 +101,10 @@ no incremental update.
 | `--git` | take the file list from `git ls-files`, so ignored files are never indexed |
 | `--local` | per-project index at the repository root; implies `--git` |
 | `--no-git` | with `--local`, walk the directory instead of asking git |
+| `--if-changed` | rebuild only if a git root has moved or its working tree changed |
+| `--background` | do the work in a detached process and return immediately |
+| `--install-hooks` | install git hooks that refresh the local index on every git event (implies `--local`) |
+| `--uninstall-hooks` | remove those hooks |
 
 ### Search — `csearch`
 

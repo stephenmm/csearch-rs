@@ -69,10 +69,44 @@ apply to plain directories. Not chosen; easy to add later as an option.
 - The index format is unchanged. A local index is an ordinary index whose
   root list has one entry.
 
+## Automatic refresh (part 3)
+
+Built on the per-project index:
+
+- **A git-state stamp**, a sidecar `<index>.meta`, records each git root's
+  `HEAD` and a fingerprint of `git status --porcelain` after each build. It is
+  a plain text file with a header line; a lost or unreadable stamp only ever
+  costs one extra rebuild, so it needs no format versioning. No `serde`
+  dependency was added.
+- **`cindex --if-changed`** rebuilds only when the planned root set differs
+  from the stamp, or any root's `HEAD` or working-tree fingerprint has moved.
+  Conservative: anything unknown (no stamp, a non-git root, a git error)
+  rebuilds. Never skips when a rebuild might be needed.
+- **`cindex --background`** re-execs itself detached with stdio to null and
+  returns immediately, guarded by an env var so it detaches exactly once. A
+  hook can therefore refresh the index without making git wait.
+- **`cindex --install-hooks`** writes `post-checkout`, `post-merge`,
+  `post-commit` and `post-rewrite`, each running
+  `cindex --local --if-changed --background`, into the repository's hooks
+  directory (honouring `core.hooksPath`). It leaves foreign hooks alone —
+  overwriting only files carrying the `csearch-rs` marker — and implies
+  `--local` so the initial index is built. `--uninstall-hooks` removes only
+  the marked ones.
+- **`csearch` staleness note**: a one-line stderr warning when a stamped
+  root's `HEAD` has moved since the build. HEAD-only, so it costs one
+  `git rev-parse` per stamped root and nothing for a non-git index. It does
+  not change the exit status.
+
+The staleness note is HEAD-only for speed on the search path, while
+`--if-changed` also checks the working-tree fingerprint for correctness on the
+indexing path: an uncommitted edit should force a rebuild, but need not slow
+every search.
+
 ## Deferred
 
 - Relative paths in the index, so it survives `mv` of the repository — needs
   a format version, and `csearch` re-absolutising names on output.
 - `csearch --all` over a registry of known local indexes; per-project indexes
   make cross-project search something to ask for explicitly.
-- Automatic refresh: hooks, `--if-changed`, staleness warning — part 3.
+- A filesystem watcher for edits between git events — a resident process, a
+  heavier dependency, behind a Cargo feature.

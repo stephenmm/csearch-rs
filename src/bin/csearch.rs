@@ -208,6 +208,12 @@ fn run() -> Result<i32> {
         eprintln!("index: {}", index_path.display());
     }
     let idx = Index::open(&index_path)?;
+    // One cheap line if a git root has moved since the index was built, so a
+    // stale result set is never silently trusted. HEAD-only, so it adds a
+    // single `git rev-parse` per stamped root and nothing for non-git indexes.
+    if let Some(msg) = csearch::gitstate::staleness(&index_path) {
+        eprintln!("{msg}");
+    }
 
     let candidates: Vec<u32> = if args.brute {
         (0..idx.num_files()).collect()
