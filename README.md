@@ -70,6 +70,7 @@ reflect changed files — there is no watcher and no incremental update.
 | `-j N` | worker threads (default: all cores) |
 | `--batch-mib N` | source bytes buffered per batch (default 256) |
 | `--verbose` | list every skipped file and progress |
+| `--git` | take the file list from `git ls-files`, so ignored files are never indexed |
 
 ### Search — `csearch`
 
@@ -110,7 +111,10 @@ matched, **1** nothing matched, **2** an error.
   `.`, `#` or `~` or ending in `~`; files containing NUL; invalid UTF-8; lines
   over 2000 bytes; more than 20,000 distinct trigrams; larger than 1 GiB.
   Read and permission errors are always reported; the routine skips need
-  `--verbose`.
+  `--verbose`. With `--git`, the file list comes from git — tracked files plus
+  untracked ones that are not ignored — so `.gitignore` is honoured and build
+  output never enters the index. Roots outside a repository fall back to
+  walking, with a note.
 - **There is no `-v`.** Everywhere else it means invert-match, which a trigram
   index fundamentally cannot do — the index finds files that *may* contain a
   match, not files that do not. Use `--verbose` for verbose output.
@@ -249,7 +253,8 @@ One caveat when comparing results: the two do not search identical file sets.
 csearch-rs omits files it declined to index — very long lines, more than 20,000
 distinct trigrams, invalid UTF-8 — which ripgrep still reads. Invisible for a
 selective pattern; on `[a-z]+` over the whole kernel it is a 0.2% difference in
-match count.
+match count. In the other direction, a plain `cindex` indexes files ripgrep
+would skip via `.gitignore`; `cindex --git` closes that gap.
 
 ## Compared with Google's codesearch
 

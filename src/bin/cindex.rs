@@ -30,6 +30,10 @@ struct Args {
     /// Drop this root from the index and rebuild (repeatable).
     #[arg(long, value_name = "PATH")]
     remove: Vec<PathBuf>,
+    /// Take the file list from `git ls-files`, so ignored files are not
+    /// indexed. Roots outside a repository fall back to walking.
+    #[arg(long)]
+    git: bool,
     /// Print progress and skipped files.
     #[arg(long, short = 'v')]
     verbose: bool,
@@ -96,6 +100,7 @@ fn main() -> Result<()> {
     let opts = BuildOptions {
         verbose: args.verbose,
         batch_bytes: args.batch_mib << 20,
+        git: args.git,
         ..Default::default()
     };
     let stats = build_index(&plan.roots, &index_path, &opts)?;

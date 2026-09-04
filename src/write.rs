@@ -27,6 +27,7 @@ use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 use walkdir::WalkDir;
 
@@ -42,6 +43,10 @@ pub struct BuildOptions {
     pub batch_bytes: u64,
     /// Files larger than this are skipped, and counted as skipped.
     pub max_file_bytes: u64,
+    /// Take the file list from `git ls-files` for roots inside a work tree,
+    /// so ignored files are never indexed. Roots outside a repository, or a
+    /// machine without git, fall back to walking.
+    pub git: bool,
 }
 
 impl Default for BuildOptions {
@@ -50,6 +55,7 @@ impl Default for BuildOptions {
             verbose: false,
             batch_bytes: 256 << 20,
             max_file_bytes: MAX_FILE_LEN,
+            git: false,
         }
     }
 }
@@ -215,6 +221,96 @@ fn walk(roots: &[String], max_file_bytes: u64) -> (Vec<(PathBuf, u64)>, usize) {
     (files, too_large)
 }
 
+/// The files git considers part of the work tree under `root`: tracked, plus
+/// untracked but not ignored -- what a developer means by "the repo". `None`
+/// when `root` is not inside a repository or git cannot be run, so the caller
+/// can fall back to walking.
+fn git_files(root: &str) -> Option<Vec<PathBuf>> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            root,
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut files = Vec::new();
+    for rel in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+        let rel = String::from_utf8_lossy(rel);
+        // git always prints '/'; rebuild with the platform separator so the
+        // stored names look the same as walked ones do.
+        let mut path = PathBuf::from(root);
+        path.extend(rel.split('/'));
+        files.push(path);
+    }
+    Some(files)
+}
+
+/// The files to index under `roots`: git's list when asked for and
+/// available, otherwise a directory walk. Returns (path, size) pairs and the
+/// number skipped for being over the size limit.
+fn collect_files(roots: &[String], opts: &BuildOptions) -> (Vec<(PathBuf, u64)>, usize) {
+    if !opts.git {
+        return walk(roots, opts.max_file_bytes);
+    }
+    let mut files = Vec::new();
+    let mut too_large = 0usize;
+    for root in roots {
+        let Some(listed) = git_files(root) else {
+            eprintln!(
+                "cindex: {root}: not a git work tree (or git not found), walking the directory instead"
+            );
+            let (walked, n) = walk(std::slice::from_ref(root), opts.max_file_bytes);
+            files.extend(walked);
+            too_large += n;
+            continue;
+        };
+        for path in listed {
+            // The same name rules as the walk, applied to every component
+            // below the root, so `.github/` and editor droppings are treated
+            // exactly as they are without --git (and as ripgrep treats them).
+            let hidden = path.strip_prefix(root).is_ok_and(|rel| {
+                rel.components()
+                    .any(|c| c.as_os_str().to_str().is_some_and(skip_name))
+            });
+            if hidden {
+                continue;
+            }
+            // git may list a file deleted since the last commit, a symlink,
+            // or a submodule / nested-repository directory; only regular files
+            // are indexed, as with walking.
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let len = meta.len();
+            if len > opts.max_file_bytes {
+                eprintln!(
+                    "cindex: {}: {len} bytes is over the {}-byte limit, skipping",
+                    path.display(),
+                    opts.max_file_bytes
+                );
+                too_large += 1;
+                continue;
+            }
+            files.push((path, len));
+        }
+    }
+    // git lists in index order; sort so file ids are deterministic and
+    // path-ordered, as they are when walking.
+    files.sort();
+    (files, too_large)
+}
+
 /// Build a fresh index of `roots` at `out`.
 pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result<Stats> {
     let t0 = Instant::now();
@@ -227,7 +323,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
         eprintln!("cindex: {child} is inside {parent}, not indexing it twice");
     }
 
-    let (files, too_large) = walk(&root_strs, opts.max_file_bytes);
+    let (files, too_large) = collect_files(&root_strs, opts);
     let mut stats = Stats {
         files_seen: files.len() + too_large,
         files_skipped: too_large,

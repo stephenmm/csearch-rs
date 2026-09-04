@@ -302,6 +302,79 @@ fn unreadable_file_is_reported_without_verbose() {
     restore_readable(&secret);
 }
 
+fn have_git() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+#[test]
+fn git_flag_falls_back_with_a_note_outside_a_repository() {
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("f.txt"), "needle\n").unwrap();
+    let index = dir.path().join("index");
+    // GIT_CEILING_DIRECTORIES stops git from discovering some repository that
+    // happens to enclose the temp directory on this machine.
+    let out = Command::new(env!("CARGO_BIN_EXE_cindex"))
+        .env("CSEARCHINDEX", &index)
+        .env("GIT_CEILING_DIRECTORIES", dir.path())
+        .args(["--git", plain.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let err = text(&out.stderr);
+    assert!(err.contains("walking the directory instead"), "{err}");
+    assert!(err.contains("1 files indexed"), "{err}");
+}
+
+#[test]
+fn git_flag_excludes_ignored_files_end_to_end() {
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir_all(root.join("build")).unwrap();
+    fs::write(root.join(".gitignore"), "build/\n").unwrap();
+    fs::write(root.join("a.rs"), "needle tracked\n").unwrap();
+    fs::write(root.join("build/out.txt"), "needle ignored\n").unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    assert!(git(&["init", "-q"]) && git(&["add", "-A"]) && git(&["commit", "-q", "-m", "init"]));
+
+    let index = dir.path().join("index");
+    let out = cindex(&index, &["--git", root.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let listed = text(&csearch(&index, &["-l", "needle"]).stdout);
+    assert!(listed.contains("a.rs"), "{listed}");
+    assert!(
+        !listed.contains("out.txt"),
+        "ignored file was searched: {listed}"
+    );
+}
+
 #[test]
 fn output_order_and_totals_survive_chunking() {
     // Results are grepped in parallel batches and written batch by batch.
