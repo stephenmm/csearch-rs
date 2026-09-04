@@ -103,8 +103,15 @@ search finishes. Read and permission errors are reported without `--verbose`;
 
 **Distribution.** BSD-3-Clause, matching upstream, with the derivation recorded
 in NOTICE. `build_standalone.py` produces a static-CRT Windows binary (no VC++
-redistributable) and a static musl Linux binary (no glibc floor); a `v*` tag
-publishes both to a GitHub release.
+redistributable) and a static musl Linux binary (no glibc floor) from this
+machine; it cannot produce macOS binaries, since that needs Apple's own
+toolchain. CI additionally builds native macOS binaries for Apple Silicon and
+Intel (they link only system libraries -- there is no static-linking
+equivalent on macOS, and none is needed). A `v*` tag publishes all four to a
+GitHub release. A PR cannot merge unless `Cargo.toml`'s version increased
+(the `version-check` job); this only gates the merge button, not a direct
+`git push` to main, since GitHub has no server-side hook for that outside
+Enterprise Server.
 
 ## Open questions / TODO
 

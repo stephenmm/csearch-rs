@@ -17,6 +17,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A required status check (see branch protection) that blocks the merge
+  # button on a PR whose Cargo.toml version has not moved. It cannot stop a
+  # direct `git push` to main -- GitHub has no server-side hook for that on
+  # github.com -- only PRs going through the merge button.
+  version-check:
+    name: version-check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare against the PR base
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git show "${{ github.event.pull_request.base.sha }}:Cargo.toml" > /tmp/base-Cargo.toml
+          python3 .github/scripts/check_version_bump.py /tmp/base-Cargo.toml Cargo.toml
+
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -34,6 +54,17 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             rustflags: "-C target-feature=+crt-static"
+          # Native builds on each architecture's own hardware, matching
+          # ripgrep's own release layout: separate per-arch tarballs, not a
+          # lipo-combined universal2 binary.
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            rustflags: ""
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            rustflags: ""
 
     steps:
       - uses: actions/checkout@v7
@@ -96,6 +127,25 @@ jobs:
           }
           Write-Output "PASS: no C-runtime imports"
 
+      # macOS always links libSystem, unlike Linux/Windows that has no
+      # equivalent redistributable concern; what's worth asserting is that
+      # nothing from Homebrew or elsewhere crept into the dependency tree.
+      - name: Verify it runs and links only system libraries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cd target/${{ matrix.target }}/release
+          for b in cindex csearch; do
+            file "$b"
+            otool -L "$b"
+            if otool -L "$b" | tail -n +2 | awk '{print $1}' | grep -qvE '^(/usr/lib/|/System/)'; then
+              echo "FAIL: $b links something outside the system libraries"
+              exit 1
+            fi
+            ./"$b" --version
+          done
+          echo "PASS: both binaries run and link only system libraries"
+
       - name: Package
         shell: bash
         run: |
@@ -142,5 +192,5 @@ jobs:
           ls -la dist
           gh release create "${GITHUB_REF_NAME}" dist/* \
             --title "csearch-rs ${GITHUB_REF_NAME}" \
-            --notes "Standalone x86_64 binaries. Linux is static musl (any distro); Windows is static-CRT (no VC++ redistributable)." \
+            --notes "Standalone binaries, no installer or redistributable needed. Linux (static musl, any distro), Windows (static CRT), macOS Apple Silicon and Intel (unsigned -- right-click > Open on first run)." \
             --verify-tag

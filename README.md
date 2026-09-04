@@ -34,10 +34,17 @@ search until the files change.
 
 ## Install
 
-**Prebuilt binaries** — [latest release](https://github.com/stephenmm/csearch-rs/releases/latest).
-Both are fully static: the Linux build is musl-linked and runs on any x86-64
-distribution, the Windows build needs no Visual C++ redistributable. Unpack
-them anywhere on your `PATH`.
+**Prebuilt binaries** — [latest release](https://github.com/stephenmm/csearch-rs/releases/latest),
+for Linux, Windows, and macOS (Apple Silicon and Intel, as separate downloads —
+no universal binary). No installer or redistributable is needed on any of them:
+the Linux build is musl-linked and runs on any x86-64 distribution, the Windows
+build needs no Visual C++ redistributable, and macOS links only the system
+libraries every Mac already has. Unpack the one for your platform anywhere on
+your `PATH`.
+
+The macOS binaries are not code-signed, so Gatekeeper will refuse to run them
+on first launch. Right-click the binary and choose **Open** once (or run
+`xattr -d com.apple.quarantine <path>`), and it runs normally after that.
 
 **From source** — Rust 1.75 or newer:
 
@@ -395,8 +402,10 @@ produced none. `CSEARCH_PROP_ITERS=40 cargo test --test superset` runs it hard.
 
 Beyond the suite: 11/11 parity with the Go original on two corpora, `csearch -c`
 matching `grep -Ec` per file on every pattern tried, and identical results from
-the static Linux and Windows builds. CI runs the suite, `rustfmt` and
-`clippy -D warnings` on both platforms for every push.
+the Linux and Windows builds. CI runs the suite, `rustfmt` and
+`clippy -D warnings` on Linux, Windows and macOS (Apple Silicon and Intel) for
+every push, and a pull request cannot merge unless `Cargo.toml`'s version has
+moved.
 
 ## Contributing
 
