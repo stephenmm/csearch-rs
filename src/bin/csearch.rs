@@ -204,6 +204,9 @@ fn run() -> Result<i32> {
     };
 
     let index_path = args.indexpath.clone().unwrap_or_else(default_index_path);
+    if args.verbose {
+        eprintln!("index: {}", index_path.display());
+    }
     let idx = Index::open(&index_path)?;
 
     let candidates: Vec<u32> = if args.brute {

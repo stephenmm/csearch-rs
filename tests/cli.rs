@@ -309,6 +309,190 @@ fn have_git() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// A committed repository with one tracked file and one ignored file, both
+/// containing `needle`, so a search shows which file set was indexed.
+fn init_repo(root: &Path) -> bool {
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("build")).unwrap();
+    fs::write(root.join(".gitignore"), "build/\n").unwrap();
+    fs::write(root.join("src/a.rs"), "needle tracked\n").unwrap();
+    fs::write(root.join("build/out.txt"), "needle ignored\n").unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    git(&["init", "-q"]) && git(&["add", "-A"]) && git(&["commit", "-q", "-m", "init"])
+}
+
+/// Run a binary from `cwd` with NO `CSEARCHINDEX` and a private home, so the
+/// only way it can find an index is the walk-up rule -- and the home fallback
+/// is a path known not to exist rather than whatever this machine has.
+///
+/// The private home also needs a git config: an empty home plus a work tree on
+/// a filesystem that records no ownership (exFAT, and CI temp dirs) makes git
+/// refuse the repo with "dubious ownership", which would make `--local` fall
+/// back to walking. `safe.directory = *` restores the behaviour git has in a
+/// normally configured environment -- it does not disable anything in the
+/// product, only in this synthetic home.
+fn run_from(exe: &str, cwd: &Path, home: &Path, args: &[&str]) -> Output {
+    let gitconfig = home.join(".gitconfig");
+    if !gitconfig.exists() {
+        fs::write(&gitconfig, "[safe]\n\tdirectory = *\n").unwrap();
+    }
+    Command::new(exe)
+        .current_dir(cwd)
+        .env_remove("CSEARCHINDEX")
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(args)
+        .output()
+        .expect("run")
+}
+
+#[test]
+fn local_index_is_created_excluded_and_discovered() {
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    assert!(init_repo(&root));
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let (cindex_exe, csearch_exe) = (env!("CARGO_BIN_EXE_cindex"), env!("CARGO_BIN_EXE_csearch"));
+
+    // From a subdirectory, --local finds the repo root and indexes it there.
+    let out = run_from(cindex_exe, &root.join("src"), &home, &["--local"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let err = text(&out.stderr);
+    assert!(err.contains("local index at"), "{err}");
+    assert!(
+        root.join(".csearchindex").is_file(),
+        "index not at the repo root"
+    );
+
+    // git must not see it: excluded via info/exclude, not .gitignore.
+    let status = Command::new("git")
+        .args(["-C", root.to_str().unwrap(), "status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert_eq!(text(&status.stdout).trim(), "", "git sees the index");
+    let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|l| l == ".csearchindex"), "{exclude}");
+    assert!(!fs::read_to_string(root.join(".gitignore"))
+        .unwrap()
+        .contains("csearchindex"));
+
+    // From anywhere inside the repo, csearch finds it with no configuration,
+    // and --local implied --git so the ignored file is not there.
+    let out = run_from(csearch_exe, &root.join("src"), &home, &["-l", "needle"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let listed = text(&out.stdout);
+    assert!(listed.contains("a.rs"), "{listed}");
+    assert!(
+        !listed.contains("out.txt"),
+        "ignored file was indexed: {listed}"
+    );
+
+    // From outside the repo there is nothing to find -- the local index must
+    // not leak into unrelated directories.
+    let out = run_from(csearch_exe, dir.path(), &home, &["needle"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("no index"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // Running it again is idempotent: one exclude line, not two.
+    let out = run_from(cindex_exe, &root, &home, &["--local"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+    assert_eq!(exclude.lines().filter(|l| *l == ".csearchindex").count(), 1);
+
+    // And plain `cindex` inside the repo now rebuilds the local one, not home.
+    let out = run_from(cindex_exe, &root.join("src"), &home, &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        !home.join(".csearchindex").exists(),
+        "wrote to the home index instead"
+    );
+}
+
+#[test]
+fn local_no_git_walks_the_directory() {
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    assert!(init_repo(&root));
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    let out = run_from(
+        env!("CARGO_BIN_EXE_cindex"),
+        &root,
+        &home,
+        &["--local", "--no-git"],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let listed = text(
+        &run_from(
+            env!("CARGO_BIN_EXE_csearch"),
+            &root,
+            &home,
+            &["-l", "needle"],
+        )
+        .stdout,
+    );
+    assert!(
+        listed.contains("out.txt"),
+        "--no-git should have walked past .gitignore: {listed}"
+    );
+}
+
+#[test]
+fn explicit_indexpath_still_wins_over_a_local_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plain");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("f.txt"), "needle\n").unwrap();
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    // A local index exists...
+    assert!(
+        run_from(env!("CARGO_BIN_EXE_cindex"), &root, &home, &["--local"])
+            .status
+            .success()
+    );
+    // ...but --indexpath names a different, empty one, and that is what is used.
+    let other = dir.path().join("other.index");
+    let out = run_from(
+        env!("CARGO_BIN_EXE_csearch"),
+        &root,
+        &home,
+        &["--indexpath", other.to_str().unwrap(), "needle"],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+}
+
 #[test]
 fn git_flag_falls_back_with_a_note_outside_a_repository() {
     if !have_git() {
