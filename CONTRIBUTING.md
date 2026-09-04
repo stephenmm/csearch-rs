@@ -17,8 +17,8 @@ story.
 
 ## What CI requires
 
-Every push runs on Linux and Windows, and all four of these must pass. Run
-them locally before opening a pull request:
+Every push runs on Linux, Windows, and macOS (Apple Silicon and Intel), and
+all four of these must pass. Run them locally before opening a pull request:
 
 ```
 cargo fmt --check
@@ -26,6 +26,13 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --locked                        # the manifest must match Cargo.lock
 ```
+
+A pull request also cannot merge unless `[package].version` in `Cargo.toml`
+has increased from `main`. Bump it by whatever a semver change of this size
+warrants; for a change that genuinely touches nothing release-worthy (CI
+config, docs, a comment), put `[skip version]` in the PR title instead.
+`.github/scripts/check_version_bump.py` is the check itself, runnable
+standalone if you want to see why it passed or failed.
 
 `clippy` runs on both platforms in CI because the index-replacement code is
 `#[cfg(windows)]` and is only linted where it compiles. If you touch anything
