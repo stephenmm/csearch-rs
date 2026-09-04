@@ -221,12 +221,23 @@ fn walk(roots: &[String], max_file_bytes: u64) -> (Vec<(PathBuf, u64)>, usize) {
     (files, too_large)
 }
 
-/// The files git considers part of the work tree under `root`: tracked, plus
-/// untracked but not ignored -- what a developer means by "the repo". `None`
-/// when `root` is not inside a repository or git cannot be run, so the caller
-/// can fall back to walking.
-fn git_files(root: &str) -> Option<Vec<PathBuf>> {
-    let out = Command::new("git")
+/// Outcome of asking git for the file list under a root.
+enum GitList {
+    /// The work-tree files: tracked, plus untracked but not ignored.
+    Files(Vec<PathBuf>),
+    /// `root` is simply not inside a git repository -- expected, walk quietly.
+    NotARepo,
+    /// git could not list the files for some other reason (not installed, or
+    /// an error such as "dubious ownership" on a filesystem without ownership,
+    /// common on exFAT). Carries git's own message so the caller can show it,
+    /// because silently walking would index files the user asked git to skip.
+    Unavailable(String),
+}
+
+/// What git considers part of the work tree under `root`: tracked files plus
+/// untracked-but-not-ignored ones -- what a developer means by "the repo".
+fn git_files(root: &str) -> GitList {
+    let out = match Command::new("git")
         .args([
             "-C",
             root,
@@ -237,9 +248,18 @@ fn git_files(root: &str) -> Option<Vec<PathBuf>> {
             "--exclude-standard",
         ])
         .output()
-        .ok()?;
+    {
+        Ok(o) => o,
+        Err(_) => return GitList::Unavailable("git could not be run".into()),
+    };
     if !out.status.success() {
-        return None;
+        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // git reports both "not a repository" and real errors as exit 128;
+        // only the former is the routine "this root isn't a repo" case.
+        if msg.contains("not a git repository") {
+            return GitList::NotARepo;
+        }
+        return GitList::Unavailable(msg);
     }
     let mut files = Vec::new();
     for rel in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
@@ -250,7 +270,7 @@ fn git_files(root: &str) -> Option<Vec<PathBuf>> {
         path.extend(rel.split('/'));
         files.push(path);
     }
-    Some(files)
+    GitList::Files(files)
 }
 
 /// The files to index under `roots`: git's list when asked for and
@@ -263,14 +283,27 @@ fn collect_files(roots: &[String], opts: &BuildOptions) -> (Vec<(PathBuf, u64)>,
     let mut files = Vec::new();
     let mut too_large = 0usize;
     for root in roots {
-        let Some(listed) = git_files(root) else {
-            eprintln!(
-                "cindex: {root}: not a git work tree (or git not found), walking the directory instead"
-            );
-            let (walked, n) = walk(std::slice::from_ref(root), opts.max_file_bytes);
-            files.extend(walked);
-            too_large += n;
-            continue;
+        let listed = match git_files(root) {
+            GitList::Files(f) => f,
+            GitList::NotARepo => {
+                eprintln!("cindex: {root}: not a git work tree, walking the directory instead");
+                let (walked, n) = walk(std::slice::from_ref(root), opts.max_file_bytes);
+                files.extend(walked);
+                too_large += n;
+                continue;
+            }
+            GitList::Unavailable(msg) => {
+                // Show git's own words: silently walking would index the very
+                // files --git was meant to exclude, so the user should see why.
+                eprintln!("cindex: {root}: could not use git, walking the directory instead");
+                for line in msg.lines() {
+                    eprintln!("cindex:   {line}");
+                }
+                let (walked, n) = walk(std::slice::from_ref(root), opts.max_file_bytes);
+                files.extend(walked);
+                too_large += n;
+                continue;
+            }
         };
         for path in listed {
             // The same name rules as the walk, applied to every component

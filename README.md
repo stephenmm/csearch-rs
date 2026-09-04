@@ -53,16 +53,24 @@ Dependencies are caret ranges; `Cargo.lock` records a set verified to build on
 ### Index a tree — `cindex`
 
 ```
-cindex ~/src                 # index a tree (added to any existing roots)
-cindex                       # re-index the roots already stored
+cindex --local               # index this repository into .csearchindex at its root
+cindex ~/src                 # or: index a tree into the shared index (added to any existing roots)
+cindex                       # re-index whichever index applies here
 cindex --list                # show the indexed roots
 cindex --remove ~/src/old    # drop one root and rebuild
 cindex --reset               # delete the index
 ```
 
-Adding a path indexes it *and* everything already indexed, so the index always
-covers every root you have added. Re-run `cindex` whenever you want results to
-reflect changed files — there is no watcher and no incremental update.
+`cindex --local` is the simplest way to start: it finds the enclosing
+repository, indexes it into a `.csearchindex` file at the root (kept out of
+`git status` via `info/exclude`), and takes the file list from git so ignored
+files are never indexed. From then on `cindex` and `csearch` anywhere inside
+that repository use that index with no configuration.
+
+Adding a path to the shared index indexes it *and* everything already there,
+so that index always covers every root you have added. Re-run `cindex`
+whenever you want results to reflect changed files — there is no watcher and
+no incremental update.
 
 | Flag | Meaning |
 |---|---|
@@ -71,6 +79,8 @@ reflect changed files — there is no watcher and no incremental update.
 | `--batch-mib N` | source bytes buffered per batch (default 256) |
 | `--verbose` | list every skipped file and progress |
 | `--git` | take the file list from `git ls-files`, so ignored files are never indexed |
+| `--local` | per-project index at the repository root; implies `--git` |
+| `--no-git` | with `--local`, walk the directory instead of asking git |
 
 ### Search — `csearch`
 
@@ -99,9 +109,11 @@ Syntax is the [`regex` crate's](https://docs.rs/regex/latest/regex/#syntax) —
 Perl-like, but with no backtracking, so matching is linear-time and cannot blow
 up on a pathological pattern.
 
-The index lives at `$CSEARCHINDEX`, else `~/.csearchindex`
-(`%USERPROFILE%\.csearchindex` on Windows). Exit status follows grep: **0**
-matched, **1** nothing matched, **2** an error.
+Which index is used, in order: `--indexpath`; then `$CSEARCHINDEX`; then the
+nearest `.csearchindex` at or above the working directory (a project index
+from `cindex --local`); then `~/.csearchindex` (`%USERPROFILE%\.csearchindex`
+on Windows). `--verbose` prints the one chosen. Exit status follows grep:
+**0** matched, **1** nothing matched, **2** an error.
 
 ## Good to know
 
