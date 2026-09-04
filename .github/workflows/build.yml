@@ -54,21 +54,26 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             rustflags: "-C target-feature=+crt-static"
-          # Native builds on each architecture's own hardware, matching
-          # ripgrep's own release layout: separate per-arch tarballs, not a
-          # lipo-combined universal2 binary. Floating -latest labels, like
-          # the two legs above, rather than a specific macOS version: GitHub
-          # retires old macOS images (macos-13 is gone entirely as of this
-          # writing, macos-14 is deprecated) faster than Ubuntu/Windows ones,
-          # so a pinned version needs periodic manual bumping to avoid a job
-          # that queues forever with no runner left to serve it.
-          - name: macos-x86_64
-            os: macos-latest-large
-            target: x86_64-apple-darwin
-            rustflags: ""
+          # Both mac legs run on the same free arm64 runner (macos-latest):
+          # Xcode's own toolchain cross-compiles to x86_64-apple-darwin from
+          # Apple Silicon out of the box (it's how Xcode itself builds
+          # universal apps), so a native Intel runner is not needed. That
+          # matters because GitHub's Intel-Mac labels (macos-latest-large and
+          # friends) sit behind the paid "larger runners" tier and fail the
+          # job outright without a spending limit configured on the account
+          # -- confirmed by actually hitting that wall, not assumed. Floating
+          # -latest, like the two legs above, rather than a pinned macOS
+          # version: GitHub retires old images (macos-13 is gone entirely as
+          # of this writing, macos-14 is deprecated) faster than Ubuntu or
+          # Windows ones, so a pin needs periodic manual bumping to avoid a
+          # job that queues forever with no runner left to serve it.
           - name: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
+            rustflags: ""
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
             rustflags: ""
 
     steps:
@@ -76,6 +81,14 @@ jobs:
 
       - name: Add target
         run: rustup target add ${{ matrix.target }}
+
+      # The x86_64-apple-darwin leg cross-compiles fine on this arm64 runner
+      # (see the matrix comment above), but *running* the resulting test
+      # binaries needs Rosetta 2 to translate x86_64 back on arm64 hardware.
+      # A no-op if already present, so it costs nothing on the arm64 leg.
+      - name: Install Rosetta 2 (macOS)
+        if: runner.os == 'macOS'
+        run: softwareupdate --install-rosetta --agree-to-license
 
       # Lint before testing so a style or clippy failure surfaces in seconds.
       # fmt is platform-independent, so once is enough; clippy runs on both
