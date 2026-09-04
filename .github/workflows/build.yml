@@ -56,13 +56,18 @@ jobs:
             rustflags: "-C target-feature=+crt-static"
           # Native builds on each architecture's own hardware, matching
           # ripgrep's own release layout: separate per-arch tarballs, not a
-          # lipo-combined universal2 binary.
+          # lipo-combined universal2 binary. Floating -latest labels, like
+          # the two legs above, rather than a specific macOS version: GitHub
+          # retires old macOS images (macos-13 is gone entirely as of this
+          # writing, macos-14 is deprecated) faster than Ubuntu/Windows ones,
+          # so a pinned version needs periodic manual bumping to avoid a job
+          # that queues forever with no runner left to serve it.
           - name: macos-x86_64
-            os: macos-13
+            os: macos-latest-large
             target: x86_64-apple-darwin
             rustflags: ""
           - name: macos-arm64
-            os: macos-14
+            os: macos-latest
             target: aarch64-apple-darwin
             rustflags: ""
 
