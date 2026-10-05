@@ -14,6 +14,18 @@ use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
 
+/// A root as the index stores it: the directory, and the name of the source
+/// its files are listed from (see [`crate::listing::Source`]).
+///
+/// The source is kept as written rather than parsed. An index from a later
+/// version may use one this version has never heard of; searching it needs no
+/// listing, so that is no reason to refuse to open it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootRecord {
+    pub path: String,
+    pub source: String,
+}
+
 pub struct Index {
     map: Mmap,
     paths_off: usize,
@@ -138,20 +150,20 @@ impl Index {
         })
     }
 
-    /// Root directories that were indexed.
-    pub fn roots(&self) -> Vec<String> {
+    /// The root directories that were indexed, and how each is listed.
+    pub fn roots(&self) -> Vec<RootRecord> {
+        // path NUL source NUL, repeated; an empty path ends the list.
         let section = &self.map[self.paths_off..self.names_off];
+        let mut fields = section.split(|&b| b == 0);
         let mut out = Vec::new();
-        let mut pos = 0usize;
-        while pos < section.len() {
-            let Some(len) = memchr::memchr(0, &section[pos..]) else {
-                break;
-            };
-            if len == 0 {
+        while let (Some(path), Some(source)) = (fields.next(), fields.next()) {
+            if path.is_empty() {
                 break;
             }
-            out.push(String::from_utf8_lossy(&section[pos..pos + len]).into_owned());
-            pos += len + 1;
+            out.push(RootRecord {
+                path: String::from_utf8_lossy(path).into_owned(),
+                source: String::from_utf8_lossy(source).into_owned(),
+            });
         }
         out
     }

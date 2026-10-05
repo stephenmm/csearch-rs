@@ -116,12 +116,18 @@ silently trusted.
 | `--batch-mib N` | source bytes buffered per batch (default 256) |
 | `--verbose` | list every skipped file and progress |
 | `--git` | take the file list from `git ls-files`, so ignored files are never indexed |
-| `--local` | per-project index at the repository root; implies `--git` |
-| `--no-git` | with `--local`, walk the directory instead of asking git |
+| `--walk` | list by walking the directory instead (`--no-git` is the older spelling) |
+| `--local` | per-project index at the repository root; a repository is listed through git |
 | `--if-changed` | rebuild only if a git root has moved or its working tree changed |
 | `--background` | do the work in a detached process and return immediately |
 | `--install-hooks` | install git hooks that refresh the local index on every git event (implies `--local`) |
 | `--uninstall-hooks` | remove those hooks |
+
+`--git` and `--walk` say how a root's files are listed, and the index
+remembers the answer for each root: a later `cindex-rs` lists every root the
+way it was listed before. Given with paths, either flag applies to those
+paths; given alone, to every root. `cindex-rs --list --verbose` shows which is
+in force.
 
 ### Search — `csearch-rs`
 
@@ -167,8 +173,8 @@ an error.
   Read and permission errors are always reported; the routine skips need
   `--verbose`. With `--git`, the file list comes from git — tracked files plus
   untracked ones that are not ignored — so `.gitignore` is honoured and build
-  output never enters the index. Roots outside a repository fall back to
-  walking, with a note.
+  output never enters the index, on that run and on every re-index after it.
+  Roots outside a repository fall back to walking, with a note.
 - **There is no `-v`.** Everywhere else it means invert-match, which a trigram
   index fundamentally cannot do — the index finds files that *may* contain a
   match, not files that do not. Use `--verbose` for verbose output.

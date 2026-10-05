@@ -124,10 +124,21 @@ fn index_entries_are_validated() {
 #[test]
 fn other_format_version_is_explained() {
     let (dir, bytes) = fresh();
-    let mut b = bytes.clone();
-    b[MAGIC.len() - 2] = b'9'; // "csearch-rs index 1\n" -> "... index 9\n"
-    let err = open_err(&dir, "version", &b);
-    assert!(err.contains("format version"), "{err}");
+    // The version is the digit before the newline. An index from the format
+    // before this one, and one from some format yet to come, both say what
+    // they are instead of being misread.
+    let current = bytes[MAGIC.len() - 2];
+    for other in *b"19" {
+        assert_ne!(
+            other, current,
+            "the test must use a version that is not current"
+        );
+        let mut b = bytes.clone();
+        b[MAGIC.len() - 2] = other;
+        let err = open_err(&dir, "version", &b);
+        assert!(err.contains("format version"), "{err}");
+        assert!(err.contains(&reset_hint()), "{err}");
+    }
 
     let err = open_err(&dir, "garbage", b"hello there");
     assert!(err.contains("not a csearch-rs index"), "{err}");

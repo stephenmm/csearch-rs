@@ -1,6 +1,7 @@
 //! cindex-rs — build the trigram index.
 //!
 //!   cindex-rs [--verbose] [--indexpath FILE] [-j N] [PATH...]
+//!   cindex-rs --git | --walk     how to list the files (remembered per root)
 //!   cindex-rs --local            per-project index at the repository root
 //!   cindex-rs --if-changed       rebuild only if a git root has changed
 //!   cindex-rs --install-hooks    keep the local index fresh on every git event
@@ -16,15 +17,18 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use csearch::gitstate;
+use csearch::listing::{snapshot, ListOptions, Root, Source};
 use csearch::names::CINDEX;
 use csearch::paths::{
     default_index_path, find_repo_root, legacy_index_beside, with_upgrade_notes, INDEX_FILE_NAME,
 };
 use csearch::read::Index;
-use csearch::write::{build_index, resolve_roots, BuildOptions};
+use csearch::trigram::MAX_FILE_LEN;
+use csearch::write::{build_from, plan_roots, BuildOptions, Request};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 /// Env guard: set on the detached child so `--background` does not re-detach
 /// forever.
@@ -52,16 +56,18 @@ struct Args {
     remove: Vec<PathBuf>,
     /// Index the enclosing repository (or the current directory) into a
     /// `.csearch-rs-index` at its root, kept out of git's sight via
-    /// info/exclude. Implies --git.
+    /// info/exclude. A repository is listed through git, as with --git.
     #[arg(long)]
     local: bool,
     /// Take the file list from `git ls-files`, so ignored files are not
-    /// indexed. Roots outside a repository fall back to walking.
-    #[arg(long)]
+    /// indexed. Applies to the paths given, or to every root if none is; the
+    /// index remembers it. Roots outside a repository fall back to walking.
+    #[arg(long, conflicts_with = "walk")]
     git: bool,
-    /// With --local, walk the directory instead of asking git.
-    #[arg(long, requires = "local")]
-    no_git: bool,
+    /// List by walking the directory instead. Applies and is remembered like
+    /// --git.
+    #[arg(long, alias = "no-git")]
+    walk: bool,
     /// Skip the rebuild if no git root has changed since the last one.
     #[arg(long)]
     if_changed: bool,
@@ -240,7 +246,13 @@ fn main() -> Result<()> {
     if args.list {
         let idx = Index::open(&index_path)?;
         for r in idx.roots() {
-            println!("{r}");
+            // Plain --list is paths only, as it always was; --verbose adds how
+            // each is listed, first, so a path with a tab in it stays whole.
+            if args.verbose {
+                println!("{}\t{}", r.source, r.path);
+            } else {
+                println!("{}", r.path);
+            }
         }
         return Ok(());
     }
@@ -275,16 +287,23 @@ fn main() -> Result<()> {
             .build_global()?;
     }
 
-    let stored: Vec<String> = if index_path.exists() {
-        Index::open(&index_path)?.roots()
+    let stored = if index_path.exists() {
+        stored_roots(&index_path)?
     } else {
         Vec::new()
     };
-    let mut add = args.paths.clone();
-    if let Some(r) = &root {
-        add.push(r.clone()); // duplicates collapse inside build_index
-    }
-    let plan = resolve_roots(&stored, &add, &args.remove)?;
+    let listing = match (args.git, args.walk) {
+        (true, _) => Some(Source::Git),
+        (_, true) => Some(Source::Walk),
+        _ => None,
+    };
+    let plan = plan_roots(&Request {
+        stored: &stored,
+        add: &args.paths,
+        local: root.as_deref(),
+        remove: &args.remove,
+        listing,
+    })?;
     for note in &plan.notes {
         eprintln!("{CINDEX}: {note}");
     }
@@ -299,29 +318,44 @@ fn main() -> Result<()> {
         }
         bail!("no roots left to index; use --reset to delete the index");
     }
+    let root_paths =
+        |roots: &[Root]| -> Vec<String> { roots.iter().map(|r| r.path.clone()).collect() };
 
-    // --if-changed: if the index already covers exactly these roots and no git
-    // root has changed, there is nothing to do. Conservative -- any doubt
-    // rebuilds. This is what makes the hooks cheap to fire on every event.
-    if args.if_changed && index_path.exists() {
-        let target = planned_root_strings(&plan.roots);
-        if let Some(target) = target {
-            if gitstate::is_current(&index_path, &target) {
-                if args.verbose {
-                    eprintln!("{CINDEX}: index is up to date, nothing to do");
-                }
-                return Ok(());
-            }
+    // --if-changed: if the index already covers exactly these roots, listed
+    // the same way, and no git root has changed, there is nothing to do.
+    // Conservative -- any doubt rebuilds. This is what makes the hooks cheap
+    // to fire on every event.
+    if args.if_changed
+        && plan.roots == stored
+        && gitstate::is_current(&index_path, &root_paths(&plan.roots))
+    {
+        if args.verbose {
+            eprintln!("{CINDEX}: index is up to date, nothing to do");
         }
+        return Ok(());
     }
 
+    let started = Instant::now();
+    let snap = snapshot(
+        &plan.roots,
+        &ListOptions {
+            max_file_bytes: MAX_FILE_LEN,
+            strict: false,
+        },
+    )?;
+    if args.verbose {
+        eprintln!(
+            "{CINDEX}: {} files found in {:.2?}",
+            snap.files.len(),
+            started.elapsed()
+        );
+    }
     let opts = BuildOptions {
         verbose: args.verbose,
         batch_bytes: args.batch_mib << 20,
-        git: args.git || (want_local && !args.no_git),
         ..Default::default()
     };
-    let stats = build_index(&plan.roots, &index_path, &opts)?;
+    let stats = build_from(&snap, &index_path, &opts)?;
     eprintln!(
         "{CINDEX}: {} files indexed ({} skipped), {} trigrams, {} posting entries, index {} bytes",
         stats.files_indexed,
@@ -332,9 +366,8 @@ fn main() -> Result<()> {
     );
 
     // Record git state so the next --if-changed can skip and csearch-rs can
-    // warn. Use the roots as stored, so the strings match what a later run sees.
-    let stored_now = Index::open(&index_path)?.roots();
-    gitstate::write_stamp(&index_path, &stored_now);
+    // warn.
+    gitstate::write_stamp(&index_path, &root_paths(&snap.roots));
 
     if root.is_some() {
         eprintln!("{CINDEX}: local index at {}", index_path.display());
@@ -351,15 +384,31 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The canonical, containment-collapsed strings for the planned roots -- the
-/// same set `build_index` would store -- or `None` if any cannot be
-/// canonicalised (in which case --if-changed should just rebuild).
-fn planned_root_strings(roots: &[PathBuf]) -> Option<Vec<String>> {
-    let mut out = Vec::with_capacity(roots.len());
-    for r in roots {
-        out.push(csearch::paths::canonical_string(r).ok()?);
-    }
-    Some(csearch::write::collapse_roots(out).0)
+/// The roots an index holds, each with the source it is listed from.
+///
+/// A source this version does not know -- written by a later one -- is an
+/// error here and only here: re-indexing would have to guess how to list that
+/// root, and guessing wrong silently changes what the index contains.
+fn stored_roots(index_path: &Path) -> Result<Vec<Root>> {
+    Index::open(index_path)?
+        .roots()
+        .into_iter()
+        .map(|r| {
+            let source = Source::from_tag(&r.source).ok_or_else(|| {
+                anyhow!(
+                    "{}: the root {} is listed by `{}`, which this version of {CINDEX} does \
+                     not know -- upgrade it, or run `{CINDEX} --reset` and index again",
+                    index_path.display(),
+                    r.path,
+                    r.source
+                )
+            })?;
+            Ok(Root {
+                path: r.path,
+                source,
+            })
+        })
+        .collect()
 }
 
 /// Ask git where `info/exclude` is (correct for worktrees), falling back to

@@ -13,6 +13,7 @@
 //! original without either disturbing the other.
 
 pub mod gitstate;
+pub mod listing;
 pub mod names;
 pub mod paths;
 pub mod query;
