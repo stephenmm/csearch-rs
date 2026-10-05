@@ -14,12 +14,12 @@
 //! never "unchanged". Losing or mangling the stamp only ever costs one extra
 //! rebuild, so it needs no versioning beyond its header line.
 
+use crate::githead;
 use crate::listing::{Root, Snapshot};
 use crate::names::{CINDEX, CSEARCH};
 use crate::paths::sidecar;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const HEADER: &str = "csearch-rs stamp 2";
@@ -47,23 +47,10 @@ pub fn stamp_path(index: &Path) -> PathBuf {
     sidecar(index, "meta")
 }
 
-fn git_head(root: &str) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|h| !h.is_empty())
-}
-
 fn heads_of(roots: &[Root]) -> Vec<(String, String)> {
     roots
         .iter()
-        .filter_map(|r| Some((git_head(&r.path)?, r.path.clone())))
+        .filter_map(|r| Some((githead::head(Path::new(&r.path))?, r.path.clone())))
         .collect()
 }
 
@@ -219,14 +206,15 @@ pub fn check(index: &Path, now: &Snapshot) -> (Verdict, Option<Stamp>) {
 }
 
 /// A one-line note if any stamped root's `HEAD` has moved since the index was
-/// built, else `None`. HEAD-only so it stays cheap on the search path -- one
-/// `git rev-parse` per git root, nothing for any other index.
+/// built, else `None`. This runs on every search, so it is HEAD only, and
+/// HEAD is read from the repository's files rather than by starting git: a
+/// handful of small reads per git root, and nothing for any other index.
 pub fn staleness(index: &Path) -> Option<String> {
     let stamp = read(index)?;
     let behind = stamp
         .heads
         .iter()
-        .filter(|(head, root)| git_head(root).is_some_and(|now| &now != head))
+        .filter(|(head, root)| githead::head(Path::new(root)).is_some_and(|now| &now != head))
         .count();
     match behind {
         0 => None,

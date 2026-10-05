@@ -421,6 +421,50 @@ fn search_warns_when_the_index_is_behind_head() {
 }
 
 #[test]
+fn the_behind_head_note_does_not_run_git() {
+    // The note used to cost a `git rev-parse` on every search, and starting
+    // git cost several times the search: on Windows, 38-61 ms per search with
+    // the check against 7 ms without. It is read from the repository's files
+    // now -- shown here by taking git away altogether, both when the index is
+    // built and when it is searched.
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let (dir, root, home) = scene();
+    let nothing = dir.path().join("no-programs-here");
+    fs::create_dir_all(&nothing).unwrap();
+    let without_git = |exe: &str, args: &[&str]| {
+        command_from(exe, &root, &home)
+            .env("PATH", &nothing)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // Built with no git to ask: the files are walked, and HEAD is recorded
+    // all the same.
+    let out = without_git(CINDEX, &["--local", "--walk"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let out = without_git(CSEARCH, &["alpha"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stderr), "", "nothing has moved yet");
+
+    // HEAD moves...
+    fs::write(root.join("b.rs"), "fn beta() {}\n").unwrap();
+    assert!(git(&root, &["add", "-A"]));
+    assert!(git(&root, &["commit", "-q", "-m", "two"]));
+    // ...and the search says so, still with no git in sight.
+    let out = without_git(CSEARCH, &["alpha"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).contains("behind HEAD"),
+        "no note without git on PATH: {:?}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
 fn install_hooks_writes_four_hooks_and_the_initial_index() {
     if !have_git() {
         eprintln!("skipping: git not on PATH");

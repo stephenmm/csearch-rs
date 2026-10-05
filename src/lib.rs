@@ -12,6 +12,7 @@
 //! of their own (see [`names`]), so this can be installed next to the
 //! original without either disturbing the other.
 
+pub mod githead;
 pub mod listing;
 pub mod lock;
 pub mod names;
