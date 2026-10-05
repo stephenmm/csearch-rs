@@ -342,10 +342,11 @@ fn whole_second_timestamps_are_not_trusted_near_the_build() {
     let files = [root.join("a.txt"), root.join("sub/b.txt")];
 
     // Every timestamp on a whole second, and one of them not safely older
-    // than the build. (A few seconds ahead rather than "just now", so the
-    // test does not depend on how quickly the indexer starts.)
+    // than the build. (An hour ahead rather than "just now": the test must
+    // not depend on how long the indexer takes to start, and a virus scanner
+    // meeting a freshly built binary has been seen to take five seconds.)
     set_mtime(&files[0], whole_second(-40));
-    set_mtime(&files[1], whole_second(3));
+    set_mtime(&files[1], whole_second(3600));
     assert!(run_from(CINDEX, &root, &home, &["--local"])
         .status
         .success());
@@ -371,7 +372,7 @@ fn whole_second_timestamps_are_not_trusted_near_the_build() {
     // And where the file system does keep fractions of a second, a file as
     // recent as the first one is no reason to rebuild: a single sub-second
     // timestamp shows what the file system can do.
-    let fine = whole_second(3) + Duration::from_millis(250);
+    let fine = whole_second(3600) + Duration::from_millis(250);
     set_mtime(&files[1], fine);
     if fs::metadata(&files[1]).unwrap().modified().unwrap() != fine {
         eprintln!("skipping the last part: this file system rounded a 250 ms timestamp");
