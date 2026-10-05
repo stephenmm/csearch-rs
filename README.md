@@ -187,7 +187,10 @@ an error.
   produces output immediately and exits quietly when the reader goes away.
 - **The index is replaced atomically.** A search running during a rebuild keeps
   reading the old index; a failed rebuild leaves the previous one intact. A
-  damaged index is reported rather than crashing.
+  damaged index is reported rather than crashing. Two `cindex-rs` runs on the
+  same index take turns rather than writing over each other.
+- **A few small files sit beside the index**: `.meta` (what it was built from),
+  `.lock`, and during a build `.tmp`. `cindex-rs --reset` removes them with it.
 
 ## How it works
 

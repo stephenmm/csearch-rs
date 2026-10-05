@@ -31,6 +31,11 @@ regex = "1.10.6"
 regex-syntax = "0.8.4"
 walkdir = "2.5.0"
 
+# flock(2), for the refresh lock. Already in the tree by way of memmap2; on
+# Windows the lock needs nothing beyond std.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.155"
+
 [dev-dependencies]
 tempfile = "3.10.1"
 

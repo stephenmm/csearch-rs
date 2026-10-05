@@ -35,12 +35,13 @@ they read:
   catastrophic backtracking. Query analysis is bounded (`MAX_SET`), though a
   sufficiently large bounded repetition can still be slow to analyse.
 
-There is one `unsafe` block in the library, in `src/trigram.rs`: an AVX2
-kernel guarded by runtime feature detection, with its bounds checked against
-the scalar implementation in tests. Memory mapping in `src/read.rs` is
-`unsafe` by nature of the API — a file modified while mapped is undefined
-behaviour, which is why index replacement goes through an atomic rename
-rather than writing in place.
+There are two `unsafe` blocks in the library. One is in `src/trigram.rs`: an
+AVX2 kernel guarded by runtime feature detection, with its bounds checked
+against the scalar implementation in tests. The other is in `src/lock.rs`, on
+Unix only: a single call to `flock(2)` on a file descriptor the function owns,
+which touches no memory. Memory mapping in `src/read.rs` is `unsafe` by nature
+of the API — a file modified while mapped is undefined behaviour, which is why
+index replacement goes through an atomic rename rather than writing in place.
 
 ## Out of scope
 

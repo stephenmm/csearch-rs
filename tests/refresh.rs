@@ -4,15 +4,16 @@
 
 mod common;
 
-use common::{git, have_git, run_from, set_mtime, settle, text, CINDEX, CSEARCH};
+use common::{command_from, git, have_git, run_from, set_mtime, settle, text, CINDEX, CSEARCH};
 use csearch::listing::{snapshot, ListOptions, Root, Source};
+use csearch::lock;
 use csearch::names::INDEX_FILE_NAME;
 use csearch::stamp::{self, Verdict};
 use csearch::trigram::MAX_FILE_LEN;
 use csearch::write::{build_from, BuildOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A committed one-file repo, plus a prepared private home.
@@ -536,6 +537,109 @@ fn hooks_leave_foreign_hooks_alone_and_uninstall_only_ours() {
         "our hook should be gone"
     );
     assert!(foreign.is_file(), "foreign hook must survive uninstall");
+}
+
+/// Everything in `dir` that belongs to the index: the index and its sidecars.
+fn beside_the_index(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(INDEX_FILE_NAME))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_second_indexer_waits_for_the_first() {
+    // Two builds of one index used to share a temporary file, and whichever
+    // finished second installed what the two of them had made of it.
+    let (_dir, root, home) = plain_scene();
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    let index = root.join(INDEX_FILE_NAME);
+    fs::write(root.join("a.txt"), "alpha, edited\n").unwrap();
+
+    // A refresh is "in progress": this test holds its lock.
+    let running = lock::acquire(&index, || {});
+    let before = fs::read(&index).unwrap();
+    let mut second = command_from(CINDEX, &root, &home)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        second.try_wait().unwrap().is_none(),
+        "a second indexer ran to completion while the first held the lock"
+    );
+    assert_eq!(
+        fs::read(&index).unwrap(),
+        before,
+        "it wrote the index anyway"
+    );
+    assert!(
+        !finds(&root, &home, "edited", "a.txt"),
+        "it wrote the index anyway"
+    );
+
+    // Released, it goes ahead -- and it said it had been waiting.
+    drop(running);
+    let out = second.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("waiting for another"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(finds(&root, &home, "edited", "a.txt"));
+}
+
+#[test]
+fn reset_removes_the_index_and_everything_beside_it() {
+    let (_dir, root, home) = plain_scene();
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    // The index, its stamp and its lock -- and nothing left over from the
+    // build itself.
+    let sidecars = |suffixes: &[&str]| -> Vec<String> {
+        suffixes
+            .iter()
+            .map(|s| format!("{INDEX_FILE_NAME}{s}"))
+            .collect()
+    };
+    assert_eq!(beside_the_index(&root), sidecars(&["", ".lock", ".meta"]));
+
+    let out = run_from(CINDEX, &root, &home, &["--reset"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(beside_the_index(&root), Vec::<String>::new());
+
+    // Resetting where there is nothing to reset leaves nothing behind either
+    // -- in particular, not a lock file for an index that does not exist.
+    let out = run_from(CINDEX, &root, &home, &["--reset"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(beside_the_index(&root), Vec::<String>::new());
+    assert_eq!(beside_the_index(&home), Vec::<String>::new());
+}
+
+#[test]
+fn a_run_with_nothing_to_index_creates_no_lock_file() {
+    // "No paths given and no existing index" is an error; it must not leave
+    // a lock beside an index that was never there.
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let out = run_from(CINDEX, dir.path(), &home, &[]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("no paths given and no existing index"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(beside_the_index(&home), Vec::<String>::new());
+    assert_eq!(beside_the_index(dir.path()), Vec::<String>::new());
 }
 
 #[test]

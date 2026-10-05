@@ -397,8 +397,10 @@ fn local_index_is_created_excluded_and_discovered() {
         .output()
         .unwrap();
     assert_eq!(text(&status.stdout).trim(), "", "git sees the index");
+    // One pattern covers the index and its sidecars (stamp, lock, temporary).
+    let pattern = format!("{INDEX_FILE_NAME}*");
     let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
-    assert!(exclude.lines().any(|l| l == INDEX_FILE_NAME), "{exclude}");
+    assert!(exclude.lines().any(|l| l == pattern), "{exclude}");
     assert_eq!(
         fs::read_to_string(root.join(".gitignore")).unwrap(),
         "build/\n",
@@ -431,7 +433,7 @@ fn local_index_is_created_excluded_and_discovered() {
     let out = run_from(CINDEX, &root, &home, &["--local"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
-    assert_eq!(exclude.lines().filter(|l| *l == INDEX_FILE_NAME).count(), 1);
+    assert_eq!(exclude.lines().filter(|l| *l == pattern).count(), 1);
 
     // And plain `cindex-rs` inside the repo now rebuilds the local one, not
     // home.

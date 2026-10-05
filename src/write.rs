@@ -24,7 +24,7 @@
 
 use crate::listing::{snapshot, ListOptions, Root, Snapshot, Source};
 use crate::names::CINDEX;
-use crate::paths::{canonical_string, strip_verbatim};
+use crate::paths::{canonical_string, sidecar, strip_verbatim};
 use crate::trigram::{self, MAX_FILE_LEN};
 use crate::varint;
 use anyhow::{bail, Context, Result};
@@ -392,7 +392,7 @@ pub fn build_from(snap: &Snapshot, out: &Path, opts: &BuildOptions) -> Result<St
     // Write.
     postings.par_sort_unstable_by_key(|p| p.trigram);
 
-    let tmp = out.with_extension("tmp");
+    let tmp = sidecar(out, "tmp");
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).ok();
@@ -503,7 +503,7 @@ fn replace_file(tmp: &Path, out: &Path) -> Result<()> {
         // can be renamed. Park the old index aside, install the new one, then
         // delete the parked copy -- or leave it for next time if a reader
         // still holds it.
-        let old = out.with_extension("old");
+        let old = sidecar(out, "old");
         let _ = fs::remove_file(&old);
         let had_old = out.is_file();
         if had_old {
@@ -716,7 +716,7 @@ mod tests {
         assert!(held.name(0).ends_with("a.txt"));
         let fresh = crate::read::Index::open(&out).unwrap();
         assert_eq!(fresh.num_files(), 2);
-        assert!(!out.with_extension("tmp").exists(), "tmp file left behind");
+        assert!(!sidecar(&out, "tmp").exists(), "tmp file left behind");
     }
 
     #[test]
@@ -729,7 +729,7 @@ mod tests {
         let out = dir.path().join("index");
         fs::create_dir(&out).unwrap();
         assert!(build_index(&[root], &out, &BuildOptions::default()).is_err());
-        assert!(!out.with_extension("tmp").exists(), "tmp file left behind");
+        assert!(!sidecar(&out, "tmp").exists(), "tmp file left behind");
         assert!(out.is_dir(), "the directory in the way must be untouched");
     }
 

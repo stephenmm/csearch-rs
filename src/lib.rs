@@ -13,6 +13,7 @@
 //! original without either disturbing the other.
 
 pub mod listing;
+pub mod lock;
 pub mod names;
 pub mod paths;
 pub mod query;

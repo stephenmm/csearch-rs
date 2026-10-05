@@ -300,6 +300,26 @@ mod tests {
     }
 
     #[test]
+    fn sidecars_append_to_the_whole_name() {
+        // Replacing the extension instead would hand `a.one` and `a.two` the
+        // same temporary file, and two builds would write it at once.
+        let dir = Path::new("d");
+        assert_eq!(
+            sidecar(&dir.join(INDEX_FILE_NAME), "tmp"),
+            dir.join(format!("{INDEX_FILE_NAME}.tmp"))
+        );
+        assert_eq!(sidecar(&dir.join("a.one"), "tmp"), dir.join("a.one.tmp"));
+        assert_ne!(
+            sidecar(&dir.join("a.one"), "tmp"),
+            sidecar(&dir.join("a.two"), "tmp")
+        );
+        assert_ne!(
+            sidecar(&dir.join("a.one"), "lock"),
+            sidecar(&dir.join("a.one"), "tmp")
+        );
+    }
+
+    #[test]
     fn repo_root_is_the_nearest_dot_git() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");

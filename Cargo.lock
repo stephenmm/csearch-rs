@@ -156,6 +156,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "memchr",
  "memmap2",
  "rayon",

@@ -17,9 +17,11 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use csearch::listing::{snapshot, ListOptions, Root, Source};
+use csearch::lock;
 use csearch::names::CINDEX;
 use csearch::paths::{
-    default_index_path, find_repo_root, legacy_index_beside, with_upgrade_notes, INDEX_FILE_NAME,
+    default_index_path, find_repo_root, legacy_index_beside, sidecar, with_upgrade_notes,
+    INDEX_FILE_NAME,
 };
 use csearch::read::Index;
 use csearch::stamp::{self, Verdict};
@@ -257,14 +259,30 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    // One refresh of an index at a time; said once, if it comes to waiting.
+    let waiting = || {
+        eprintln!(
+            "{CINDEX}: waiting for another {CINDEX} to finish with {}",
+            index_path.display()
+        );
+    };
     if args.reset {
-        for p in [index_path.clone(), stamp::stamp_path(&index_path)] {
+        // Under the lock, so the index is not pulled out from under a build
+        // that would then put it straight back.
+        let lock = lock::acquire(&index_path, waiting);
+        for p in [
+            index_path.clone(),
+            stamp::stamp_path(&index_path),
+            sidecar(&index_path, "tmp"),
+            sidecar(&index_path, "old"),
+        ] {
             match fs::remove_file(&p) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => bail!("removing {}: {e}", p.display()),
             }
         }
+        lock.retire(&index_path);
         return Ok(());
     }
 
@@ -277,7 +295,10 @@ fn main() -> Result<()> {
     // includes untracked files, and the index must never find itself in it.
     if let Some(r) = &root {
         if let Some(exclude) = exclude_index_from_git(r)? {
-            eprintln!("{CINDEX}: added {INDEX_FILE_NAME} to {}", exclude.display());
+            eprintln!(
+                "{CINDEX}: added {INDEX_FILE_NAME}* to {}",
+                exclude.display()
+            );
         }
     }
 
@@ -286,6 +307,22 @@ fn main() -> Result<()> {
             .num_threads(n)
             .build_global()?;
     }
+
+    // Nothing to index and nothing to protect: say so before a lock file is
+    // created beside an index that does not exist. This is also the one place
+    // an upgrade from 0.2 shows up as a puzzle -- the index is "gone" because
+    // it is still under the original's name.
+    if !index_path.exists() && args.paths.is_empty() && root.is_none() {
+        return Err(with_upgrade_notes(anyhow!(
+            "no paths given and no existing index at {}",
+            index_path.display()
+        )));
+    }
+
+    // From here to the stamp, this index is ours alone: the roots are read,
+    // the files listed, the index built and the stamp written without another
+    // refresh doing the same in between.
+    let _lock = lock::acquire(&index_path, waiting);
 
     let stored = if index_path.exists() {
         stored_roots(&index_path)?
@@ -308,14 +345,6 @@ fn main() -> Result<()> {
         eprintln!("{CINDEX}: {note}");
     }
     if plan.roots.is_empty() {
-        if stored.is_empty() {
-            // The one place an upgrade from 0.2 shows up as a puzzle: the
-            // index is "gone" because it is still under the original's name.
-            return Err(with_upgrade_notes(anyhow!(
-                "no paths given and no existing index at {}",
-                index_path.display()
-            )));
-        }
         bail!("no roots left to index; use --reset to delete the index");
     }
     let started = Instant::now();
@@ -436,9 +465,9 @@ fn git_exclude_path(root: &Path) -> Option<PathBuf> {
     Some(if p.is_absolute() { p } else { root.join(p) })
 }
 
-/// Ensure the index and its stamp sidecar are in the repository's
-/// `info/exclude`, so neither shows in `git status` and no tracked file is
-/// touched. Idempotent; returns the path if any line was added.
+/// Ensure the index and its sidecars are covered by the repository's
+/// `info/exclude`, so none of them shows in `git status` and no tracked file
+/// is touched. Idempotent; returns the path if the line was added.
 fn exclude_index_from_git(root: &Path) -> Result<Option<PathBuf>> {
     let exclude = match git_exclude_path(root) {
         Some(p) => p,
@@ -450,15 +479,11 @@ fn exclude_index_from_git(root: &Path) -> Result<Option<PathBuf>> {
             dot_git.join("info").join("exclude")
         }
     };
-    let meta = format!("{INDEX_FILE_NAME}.meta");
-    let wanted = [INDEX_FILE_NAME, meta.as_str()];
+    // One pattern for the index and everything that sits beside it: the
+    // stamp, the lock, and the temporary files of a build in progress.
+    let pattern = format!("{INDEX_FILE_NAME}*");
     let existing = fs::read_to_string(&exclude).unwrap_or_default();
-    let missing: Vec<&str> = wanted
-        .iter()
-        .copied()
-        .filter(|n| !existing.lines().any(|l| l.trim() == *n))
-        .collect();
-    if missing.is_empty() {
+    if existing.lines().any(|l| l.trim() == pattern) {
         return Ok(None);
     }
     if let Some(parent) = exclude.parent() {
@@ -468,10 +493,8 @@ fn exclude_index_from_git(root: &Path) -> Result<Option<PathBuf>> {
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
-    for name in missing {
-        text.push_str(name);
-        text.push('\n');
-    }
+    text.push_str(&pattern);
+    text.push('\n');
     fs::write(&exclude, text).with_context(|| format!("writing {}", exclude.display()))?;
     Ok(Some(exclude))
 }
