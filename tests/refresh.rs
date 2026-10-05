@@ -643,30 +643,58 @@ fn a_run_with_nothing_to_index_creates_no_lock_file() {
 }
 
 #[test]
-fn background_returns_at_once_and_the_index_appears() {
-    if !have_git() {
-        eprintln!("skipping: git not on PATH");
-        return;
-    }
-    let (_dir, root, home) = scene();
+fn background_lets_go_of_whoever_started_it() {
+    // `--background` exists so that whatever ran it -- a git hook, usually --
+    // is not kept waiting. Returning quickly is not enough: a caller that
+    // reads our output through a pipe (an IDE running git, `$out = git pull`
+    // in PowerShell, this test) waits for the pipe to close, and on Windows a
+    // child process is handed every handle its parent could inherit, pipes
+    // included. The background process then held them open, and the caller
+    // waited until the whole index had been rebuilt.
+    //
+    // So the background work is made impossible to finish -- this test holds
+    // the lock it needs -- and the output is read to its end regardless.
+    let (_dir, root, home) = plain_scene();
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
     let index = root.join(INDEX_FILE_NAME);
+    fs::write(root.join("a.txt"), "alpha, edited\n").unwrap();
 
-    let started = Instant::now();
-    let out = run_from(CINDEX, &root, &home, &["--local", "--background"]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "--background should return promptly"
+    let running = lock::acquire(&index, || {});
+    let child = command_from(CINDEX, &root, &home)
+        .arg("--background")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (done, read_to_the_end) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(child.wait_with_output());
+    });
+    let out = read_to_the_end
+        .recv_timeout(Duration::from_secs(30))
+        .expect("still waiting on the pipes of a process that was meant to have been let go")
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        (text(&out.stdout), text(&out.stderr)),
+        (String::new(), String::new())
     );
+    // The work really was left behind for later: nothing is indexed yet.
+    assert!(!finds(&root, &home, "edited", "a.txt"));
 
-    // The detached child builds the index shortly after; poll for a search to
-    // succeed rather than for the file, so we never read a half-written index.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if index.is_file() && finds(&root, &home, "alpha", "a.rs") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "background index never appeared");
+    // And it does get done, once it can be.
+    drop(running);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !finds(&root, &home, "edited", "a.txt") {
+        assert!(
+            Instant::now() < deadline,
+            "the background refresh never ran"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
+    // Let it finish before the directory it is working in is removed.
+    drop(lock::acquire(&index, || {}));
 }

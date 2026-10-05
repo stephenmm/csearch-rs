@@ -118,6 +118,7 @@ fn spawn_detached() -> Result<()> {
         use std::os::windows::process::CommandExt;
         // DETACHED_PROCESS | CREATE_NO_WINDOW: no console window, own session.
         cmd.creation_flags(0x0000_0008 | 0x0800_0000);
+        keep_our_stdio_to_ourselves();
     }
     // On Unix the child is detached enough for our purpose simply by being a
     // separate process we never wait on, with its stdio redirected to null:
@@ -125,6 +126,41 @@ fn spawn_detached() -> Result<()> {
     // session via process_group would need Rust 1.77; the MSRV here is 1.75.)
     cmd.spawn().context("spawning the background process")?;
     Ok(())
+}
+
+/// Stop this process's own standard handles from being passed on to a child.
+///
+/// Windows hands a child every inheritable handle its parent holds, not just
+/// the three it is told to use as stdin, stdout and stderr. A caller that
+/// reads our output through a pipe -- an IDE running git, `$out = git pull`
+/// in PowerShell, anything that captures a hook's output -- made those pipes
+/// inheritable so that *we* could have them. If the detached child gets them
+/// too, the caller sees no end-of-file until the child exits, which is to say
+/// until the whole index has been rebuilt: 9.4 s in one measurement, against
+/// 59 ms for a caller that was not reading. Unix has no such problem; there
+/// the child's descriptors are replaced, not added to.
+#[cfg(windows)]
+fn keep_our_stdio_to_ourselves() {
+    use std::os::windows::io::{AsRawHandle, RawHandle};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetHandleInformation(handle: RawHandle, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 0x1;
+    let handles = [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ];
+    for handle in handles {
+        if !handle.is_null() {
+            // SAFETY: `handle` is one of this process's standard handles,
+            // open for as long as the process lives. The call clears a flag
+            // on it and touches no memory of ours. Its result is ignored: a
+            // handle that will not take the flag is no worse off than before.
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
 }
 
 /// The repository's hooks directory, honouring `core.hooksPath`.
