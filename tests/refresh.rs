@@ -597,6 +597,7 @@ fn beside_the_index(dir: &Path) -> Vec<String> {
 
 #[test]
 fn a_second_indexer_waits_for_the_first() {
+    use std::io::BufRead;
     // Two builds of one index used to share a temporary file, and whichever
     // finished second installed what the two of them had made of it.
     let (_dir, root, home) = plain_scene();
@@ -614,7 +615,30 @@ fn a_second_indexer_waits_for_the_first() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(1500));
+    // It says so when it finds the lock taken, and that is the thing to wait
+    // for. A fixed pause is a guess at how long a process takes to start, and
+    // on a busy machine the guess was wrong: the second indexer arrived after
+    // the lock had been let go, had nothing to wait for, and the test failed
+    // for want of a message nobody had cause to print.
+    let (said, heard) = std::sync::mpsc::channel();
+    let stderr = second.stderr.take().unwrap();
+    let listener = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if said.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let first = heard
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the second indexer neither finished nor said it was waiting");
+    assert!(
+        first.contains("waiting for another"),
+        "a second indexer went ahead while the first held the lock: {first}"
+    );
+    // And it does wait.
+    std::thread::sleep(Duration::from_millis(500));
     assert!(
         second.try_wait().unwrap().is_none(),
         "a second indexer ran to completion while the first held the lock"
@@ -629,15 +653,12 @@ fn a_second_indexer_waits_for_the_first() {
         "it wrote the index anyway"
     );
 
-    // Released, it goes ahead -- and it said it had been waiting.
+    // Released, it goes ahead.
     drop(running);
-    let out = second.wait_with_output().unwrap();
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(
-        text(&out.stderr).contains("waiting for another"),
-        "{}",
-        text(&out.stderr)
-    );
+    let status = second.wait().unwrap();
+    let rest: Vec<String> = heard.iter().collect();
+    listener.join().unwrap();
+    assert!(status.success(), "{rest:?}");
     assert!(finds(&root, &home, "edited", "a.txt"));
 }
 
