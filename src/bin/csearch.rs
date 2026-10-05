@@ -222,7 +222,7 @@ fn run() -> Result<i32> {
     // One cheap line if a git root has moved since the index was built, so a
     // stale result set is never silently trusted. HEAD-only, so it adds a
     // single `git rev-parse` per stamped root and nothing for non-git indexes.
-    if let Some(msg) = csearch::gitstate::staleness(&index_path) {
+    if let Some(msg) = csearch::stamp::staleness(&index_path) {
         eprintln!("{msg}");
     }
 

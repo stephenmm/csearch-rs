@@ -118,7 +118,7 @@ silently trusted.
 | `--git` | take the file list from `git ls-files`, so ignored files are never indexed |
 | `--walk` | list by walking the directory instead (`--no-git` is the older spelling) |
 | `--local` | per-project index at the repository root; a repository is listed through git |
-| `--if-changed` | rebuild only if a git root has moved or its working tree changed |
+| `--if-changed` | rebuild only if a file was added, removed or modified since the last build |
 | `--background` | do the work in a detached process and return immediately |
 | `--install-hooks` | install git hooks that refresh the local index on every git event (implies `--local`) |
 | `--uninstall-hooks` | remove those hooks |

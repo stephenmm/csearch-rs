@@ -1,16 +1,22 @@
-//! Which files belong to a root.
+//! Which files belong to a root, and whether any of them has changed.
 //!
 //! Each root is *listed* from a source: a directory walk, or what git
 //! considers part of the work tree. The index records the source of every
-//! root, so that a re-index lists a root the way the index was built. Without
+//! root, so that a refresh lists a root the way the index was built. Without
 //! that, an index made from `git ls-files` would be rebuilt by walking, and
 //! every ignored file would arrive in it.
+//!
+//! A listing, with each file's size and modification time, is a [`Snapshot`].
+//! Its fingerprint is what `--if-changed` compares, so no version-control
+//! system has to be asked whether anything changed -- which is what lets a
+//! hook from any of them, or from none, refresh an index cheaply.
 
 use crate::names::CINDEX;
 use anyhow::{bail, Result};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 /// How the files under a root are found.
@@ -52,6 +58,8 @@ pub struct Root {
 pub struct FileEntry {
     pub path: PathBuf,
     pub len: u64,
+    /// `None` only where the platform cannot say.
+    pub mtime: Option<SystemTime>,
 }
 
 /// The files under a set of roots at one moment.
@@ -63,6 +71,17 @@ pub struct Snapshot {
     pub files: Vec<FileEntry>,
     /// Files left out for being over the size limit.
     pub too_large: usize,
+    /// When the listing began -- before any file was looked at, so nothing
+    /// written from here on can carry an older timestamp.
+    pub taken_at: SystemTime,
+    /// A hash of the roots, their sources, and every file's path, size and
+    /// modification time. Two snapshots with the same fingerprint list the
+    /// same files in the same state, as far as the file system can say.
+    pub fingerprint: u64,
+    /// The newest modification time among the files of any root whose
+    /// timestamps are all whole seconds. Such a root is on a file system too
+    /// coarse to tell two quick writes apart; see `stamp::compare`.
+    pub newest_coarse_mtime: Option<SystemTime>,
 }
 
 /// How to list.
@@ -71,11 +90,60 @@ pub struct ListOptions {
     /// Files larger than this are left out, and counted.
     pub max_file_bytes: u64,
     /// When a version-control listing cannot be had, fail instead of walking.
+    /// An unattended refresh sets this: walking would replace the index with
+    /// a different set of files, and the next run would swap them back.
     pub strict: bool,
 }
 
 fn skip_name(name: &str) -> bool {
     name.starts_with('.') || name.starts_with('#') || name.starts_with('~') || name.ends_with('~')
+}
+
+/// FNV-1a: a cheap, dependency-free change fingerprint. A collision would at
+/// worst skip one needed rebuild, which the next change corrects.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Fnv {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// Seconds and nanoseconds since the epoch, or `None` for a time before it
+/// (or no time at all).
+fn epoch_parts(t: Option<SystemTime>) -> Option<(u64, u32)> {
+    let d = t?.duration_since(UNIX_EPOCH).ok()?;
+    Some((d.as_secs(), d.subsec_nanos()))
+}
+
+fn fingerprint(roots: &[Root], files: &[FileEntry]) -> u64 {
+    let mut h = Fnv::new();
+    for r in roots {
+        h.write(r.path.as_bytes());
+        h.write(&[0]);
+        h.write(r.source.tag().as_bytes());
+        h.write(&[0]);
+    }
+    h.write(&[0xff]); // roots end here; a path can never start with this byte pair
+    for f in files {
+        h.write(f.path.as_os_str().as_encoded_bytes());
+        h.write(&[0]);
+        h.write(&f.len.to_le_bytes());
+        match epoch_parts(f.mtime) {
+            Some((secs, nanos)) => {
+                h.write(&secs.to_le_bytes());
+                h.write(&nanos.to_le_bytes());
+            }
+            None => h.write(&[0xfe]),
+        }
+    }
+    h.0
 }
 
 /// Every regular file under `root`, in path order, appended to `files`.
@@ -98,7 +166,8 @@ fn walk(root: &str, opts: &ListOptions, files: &mut Vec<FileEntry>, too_large: &
         if !entry.file_type().is_file() {
             continue;
         }
-        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let meta = entry.metadata().ok();
+        let len = meta.as_ref().map_or(0, fs::Metadata::len);
         if len > opts.max_file_bytes {
             eprintln!(
                 "{CINDEX}: {}: {len} bytes is over the {}-byte limit, skipping",
@@ -108,9 +177,11 @@ fn walk(root: &str, opts: &ListOptions, files: &mut Vec<FileEntry>, too_large: &
             *too_large += 1;
             continue;
         }
+        let mtime = meta.and_then(|m| m.modified().ok());
         files.push(FileEntry {
             path: entry.into_path(),
             len,
+            mtime,
         });
     }
 }
@@ -207,11 +278,31 @@ fn keep_listed(
             *too_large += 1;
             continue;
         }
-        files.push(FileEntry { path, len });
+        files.push(FileEntry {
+            path,
+            len,
+            mtime: meta.modified().ok(),
+        });
     }
     // A version-control system lists in its own order; sort so file ids are
     // deterministic and path-ordered, as they are when walking.
     files[start..].sort_by(|a, b| a.path.cmp(&b.path));
+}
+
+/// The newest modification time among `files`, if every one of them is a
+/// whole number of seconds -- the mark of a file system that cannot tell two
+/// quick writes apart. `None` if any file carries a sub-second time (the file
+/// system keeps them, so nothing here is ambiguous), or if there are no files.
+fn newest_if_coarse(files: &[FileEntry]) -> Option<SystemTime> {
+    let coarse = !files.is_empty()
+        && files
+            .iter()
+            .all(|f| matches!(epoch_parts(f.mtime), Some((_, 0))));
+    if coarse {
+        files.iter().filter_map(|f| f.mtime).max()
+    } else {
+        None
+    }
 }
 
 /// List the files under `roots`, each from its own source.
@@ -220,9 +311,12 @@ fn keep_listed(
 /// with the reason on stderr -- unless `opts.strict`, in which case that is
 /// an error and nothing is listed.
 pub fn snapshot(roots: &[Root], opts: &ListOptions) -> Result<Snapshot> {
+    let taken_at = SystemTime::now();
     let mut files = Vec::new();
     let mut too_large = 0usize;
+    let mut newest_coarse_mtime = None;
     for root in roots {
+        let start = files.len();
         match root.source {
             Source::Walk => walk(&root.path, opts, &mut files, &mut too_large),
             Source::Git => match git_files(&root.path) {
@@ -258,17 +352,38 @@ pub fn snapshot(roots: &[Root], opts: &ListOptions) -> Result<Snapshot> {
                 }
             },
         }
+        newest_coarse_mtime = newest_coarse_mtime.max(newest_if_coarse(&files[start..]));
     }
+    let fingerprint = fingerprint(roots, &files);
     Ok(Snapshot {
         roots: roots.to_vec(),
         files,
         too_large,
+        taken_at,
+        fingerprint,
+        newest_coarse_mtime,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn entry(path: &str, len: u64, secs: u64, nanos: u32) -> FileEntry {
+        FileEntry {
+            path: PathBuf::from(path),
+            len,
+            mtime: Some(UNIX_EPOCH + Duration::new(secs, nanos)),
+        }
+    }
+
+    fn root(path: &str, source: Source) -> Root {
+        Root {
+            path: path.into(),
+            source,
+        }
+    }
 
     #[test]
     fn source_tags_round_trip() {
@@ -277,5 +392,68 @@ mod tests {
         }
         assert_eq!(Source::from_tag("svn"), None);
         assert_eq!(Source::from_tag(""), None);
+    }
+
+    #[test]
+    fn a_root_is_coarse_only_if_every_timestamp_is_a_whole_second() {
+        let whole = vec![
+            entry("/r/a", 1, 100, 0),
+            entry("/r/b", 1, 300, 0),
+            entry("/r/c", 1, 200, 0),
+        ];
+        assert_eq!(
+            newest_if_coarse(&whole),
+            Some(UNIX_EPOCH + Duration::from_secs(300))
+        );
+        // One sub-second time is proof that the file system keeps them.
+        let mut mixed = whole.clone();
+        mixed[0].mtime = Some(UNIX_EPOCH + Duration::new(100, 250_000_000));
+        assert_eq!(newest_if_coarse(&mixed), None);
+        // No files, or a file with no time at all, says nothing either way.
+        assert_eq!(newest_if_coarse(&[]), None);
+        let mut unknown = whole.clone();
+        unknown[2].mtime = None;
+        assert_eq!(newest_if_coarse(&unknown), None);
+    }
+
+    #[test]
+    fn the_fingerprint_sees_every_kind_of_change() {
+        let roots = [root("/r", Source::Walk)];
+        // Times differ by at least 100 ns: that is as fine as a timestamp
+        // gets on Windows, and a smaller step would be no step at all there.
+        let base = vec![entry("/r/a", 10, 100, 500), entry("/r/b", 20, 200, 600)];
+        let fp = fingerprint(&roots, &base);
+        assert_eq!(fp, fingerprint(&roots, &base.clone()), "must be stable");
+
+        let mut grown = base.clone();
+        grown[0].len = 11;
+        let mut touched = base.clone();
+        touched[1].mtime = Some(UNIX_EPOCH + Duration::new(200, 700));
+        let mut renamed = base.clone();
+        renamed[1].path = PathBuf::from("/r/c");
+        let mut added = base.clone();
+        added.push(entry("/r/z", 0, 1, 100));
+        let removed = base[..1].to_vec();
+        let mut no_time = base.clone();
+        no_time[0].mtime = None;
+        for (what, files) in [
+            ("size", grown),
+            ("mtime", touched),
+            ("name", renamed),
+            ("an added file", added),
+            ("a removed file", removed),
+            ("a lost timestamp", no_time),
+        ] {
+            assert_ne!(fp, fingerprint(&roots, &files), "blind to {what}");
+        }
+
+        // The same files reached through a different listing are a different
+        // index: a git listing leaves out what a walk includes.
+        assert_ne!(fp, fingerprint(&[root("/r", Source::Git)], &base));
+        assert_ne!(fp, fingerprint(&[root("/q", Source::Walk)], &base));
+        // And moving a byte between adjacent fields must not cancel out.
+        let a = [entry("/r/ab", 1, 1, 100)];
+        let b = [entry("/r/a", 1, 1, 100)];
+        assert_ne!(fingerprint(&roots, &a), fingerprint(&roots, &b));
     }
 }

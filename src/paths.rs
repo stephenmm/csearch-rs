@@ -53,6 +53,16 @@ pub fn resolve_index_path(
         .join(INDEX_FILE_NAME)
 }
 
+/// A file that lives beside the index and belongs to it: `<index>.<suffix>`.
+/// The suffix is appended to the whole name rather than replacing an
+/// extension, so `a.one` and `a.two` in one directory never share a sidecar.
+pub fn sidecar(index: &Path, suffix: &str) -> PathBuf {
+    let mut name = index.as_os_str().to_owned();
+    name.push(".");
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 /// The nearest `.csearch-rs-index` file at or above `start`. A directory of
 /// that name does not count.
 pub fn find_local_index(start: &Path) -> Option<PathBuf> {

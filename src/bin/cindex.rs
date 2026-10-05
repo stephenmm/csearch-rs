@@ -3,7 +3,7 @@
 //!   cindex-rs [--verbose] [--indexpath FILE] [-j N] [PATH...]
 //!   cindex-rs --git | --walk     how to list the files (remembered per root)
 //!   cindex-rs --local            per-project index at the repository root
-//!   cindex-rs --if-changed       rebuild only if a git root has changed
+//!   cindex-rs --if-changed       rebuild only if a file has changed
 //!   cindex-rs --install-hooks    keep the local index fresh on every git event
 //!   cindex-rs --uninstall-hooks  remove those hooks
 //!   cindex-rs --remove PATH      drop a root from the index and rebuild
@@ -16,13 +16,13 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
-use csearch::gitstate;
 use csearch::listing::{snapshot, ListOptions, Root, Source};
 use csearch::names::CINDEX;
 use csearch::paths::{
     default_index_path, find_repo_root, legacy_index_beside, with_upgrade_notes, INDEX_FILE_NAME,
 };
 use csearch::read::Index;
+use csearch::stamp::{self, Verdict};
 use csearch::trigram::MAX_FILE_LEN;
 use csearch::write::{build_from, plan_roots, BuildOptions, Request};
 use std::fs;
@@ -68,7 +68,8 @@ struct Args {
     /// --git.
     #[arg(long, alias = "no-git")]
     walk: bool,
-    /// Skip the rebuild if no git root has changed since the last one.
+    /// Skip the rebuild if no file has been added, removed or modified since
+    /// the last one.
     #[arg(long)]
     if_changed: bool,
     /// Do the work in a detached background process and return immediately.
@@ -257,7 +258,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if args.reset {
-        for p in [index_path.clone(), gitstate::stamp_path(&index_path)] {
+        for p in [index_path.clone(), stamp::stamp_path(&index_path)] {
             match fs::remove_file(&p) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -272,9 +273,8 @@ fn main() -> Result<()> {
         // fall through to build the initial index (install-hooks implies --local)
     }
 
-    // Exclude the index and its stamp from git BEFORE building, so the stamp's
-    // `git status` fingerprint never counts our own files -- otherwise the
-    // first stamp would see them and a later --if-changed never matches.
+    // Exclude the index and its stamp from git BEFORE listing: git's list
+    // includes untracked files, and the index must never find itself in it.
     if let Some(r) = &root {
         if let Some(exclude) = exclude_index_from_git(r)? {
             eprintln!("{CINDEX}: added {INDEX_FILE_NAME} to {}", exclude.display());
@@ -318,23 +318,6 @@ fn main() -> Result<()> {
         }
         bail!("no roots left to index; use --reset to delete the index");
     }
-    let root_paths =
-        |roots: &[Root]| -> Vec<String> { roots.iter().map(|r| r.path.clone()).collect() };
-
-    // --if-changed: if the index already covers exactly these roots, listed
-    // the same way, and no git root has changed, there is nothing to do.
-    // Conservative -- any doubt rebuilds. This is what makes the hooks cheap
-    // to fire on every event.
-    if args.if_changed
-        && plan.roots == stored
-        && gitstate::is_current(&index_path, &root_paths(&plan.roots))
-    {
-        if args.verbose {
-            eprintln!("{CINDEX}: index is up to date, nothing to do");
-        }
-        return Ok(());
-    }
-
     let started = Instant::now();
     let snap = snapshot(
         &plan.roots,
@@ -350,6 +333,32 @@ fn main() -> Result<()> {
             started.elapsed()
         );
     }
+
+    // --if-changed: the listing is in hand, so compare it with what the index
+    // was built from before opening a single file. Conservative -- any doubt
+    // rebuilds. This is what makes a hook cheap to fire on every event.
+    if args.if_changed {
+        let (verdict, recorded) = stamp::check(&index_path, &snap);
+        match verdict {
+            Verdict::Current => {
+                // A commit moves HEAD without touching a file. Note where it
+                // is now, or csearch-rs would go on saying the index is behind.
+                if let Some(recorded) = &recorded {
+                    stamp::refresh_heads(&index_path, recorded, &snap.roots);
+                }
+                if args.verbose {
+                    eprintln!("{CINDEX}: index is up to date, nothing to do");
+                }
+                return Ok(());
+            }
+            Verdict::Stale(why) => {
+                if args.verbose {
+                    eprintln!("{CINDEX}: rebuilding: {why}");
+                }
+            }
+        }
+    }
+
     let opts = BuildOptions {
         verbose: args.verbose,
         batch_bytes: args.batch_mib << 20,
@@ -365,9 +374,9 @@ fn main() -> Result<()> {
         stats.index_bytes
     );
 
-    // Record git state so the next --if-changed can skip and csearch-rs can
-    // warn.
-    gitstate::write_stamp(&index_path, &root_paths(&snap.roots));
+    // Record what the index now holds: the listing the build started from,
+    // not the tree as it is by the time the build has finished.
+    stamp::write(&index_path, &snap, stats.index_bytes);
 
     if root.is_some() {
         eprintln!("{CINDEX}: local index at {}", index_path.display());

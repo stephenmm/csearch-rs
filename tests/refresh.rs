@@ -1,14 +1,19 @@
-//! Automatic refresh: the git-state stamp, `--if-changed`, the staleness
-//! warning, `--background`, and the git hooks. These drive the real binaries;
-//! they need `git` on PATH and skip with a message if it is missing.
+//! Automatic refresh: `--if-changed`, the stamp it compares against, the
+//! staleness note, `--background`, and the git hooks. These drive the real
+//! binaries. The ones that need `git` skip with a message if it is missing.
 
 mod common;
 
-use common::{git, have_git, run_from, text, CINDEX, CSEARCH};
+use common::{git, have_git, run_from, set_mtime, settle, text, CINDEX, CSEARCH};
+use csearch::listing::{snapshot, ListOptions, Root, Source};
 use csearch::names::INDEX_FILE_NAME;
+use csearch::stamp::{self, Verdict};
+use csearch::trigram::MAX_FILE_LEN;
+use csearch::write::{build_from, BuildOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::process::Output;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A committed one-file repo, plus a prepared private home.
 fn scene() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -19,9 +24,44 @@ fn scene() -> (tempfile::TempDir, PathBuf, PathBuf) {
     assert!(git(&root, &["init", "-q"]));
     assert!(git(&root, &["add", "-A"]));
     assert!(git(&root, &["commit", "-q", "-m", "one"]));
+    settle(&root);
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
     (dir, root, home)
+}
+
+/// A directory that no version-control system knows about.
+fn plain_scene() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plain");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join("a.txt"), "alpha\n").unwrap();
+    fs::write(root.join("sub/b.txt"), "beta\n").unwrap();
+    settle(&root);
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    (dir, root, home)
+}
+
+/// `cindex-rs --local --if-changed --verbose`, which says what it decided.
+fn refresh(root: &Path, home: &Path) -> Output {
+    let out = run_from(
+        CINDEX,
+        root,
+        home,
+        &["--local", "--if-changed", "--verbose"],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    out
+}
+
+fn skipped(out: &Output) -> bool {
+    text(&out.stderr).contains("up to date")
+}
+
+fn finds(root: &Path, home: &Path, pattern: &str, file: &str) -> bool {
+    let out = run_from(CSEARCH, root, home, &["-l", pattern]);
+    text(&out.stdout).lines().any(|l| l.ends_with(file))
 }
 
 /// The `exec` line of a hook script: the program it runs, and its arguments.
@@ -42,7 +82,7 @@ fn hook_command(hook: &Path) -> (String, Vec<String>) {
 }
 
 #[test]
-fn if_changed_skips_until_a_commit_then_rebuilds() {
+fn if_changed_skips_until_something_changes_then_rebuilds() {
     if !have_git() {
         eprintln!("skipping: git not on PATH");
         return;
@@ -53,43 +93,16 @@ fn if_changed_skips_until_a_commit_then_rebuilds() {
         .success());
 
     // Nothing changed: --if-changed does no work and says so.
-    let out = run_from(
-        CINDEX,
-        &root,
-        &home,
-        &["--local", "--if-changed", "--verbose"],
-    );
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(
-        text(&out.stderr).contains("up to date"),
-        "{}",
-        text(&out.stderr)
-    );
+    assert!(skipped(&refresh(&root, &home)));
 
-    // A new committed file changes HEAD, so --if-changed must rebuild and the
-    // new content becomes searchable.
+    // A new committed file must be picked up.
     fs::write(root.join("b.rs"), "fn beta() {}\n").unwrap();
     assert!(git(&root, &["add", "-A"]));
     assert!(git(&root, &["commit", "-q", "-m", "two"]));
-
-    let out = run_from(
-        CINDEX,
-        &root,
-        &home,
-        &["--local", "--if-changed", "--verbose"],
-    );
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(
-        !text(&out.stderr).contains("up to date"),
-        "should have rebuilt: {}",
-        text(&out.stderr)
-    );
-    let found = run_from(CSEARCH, &root, &home, &["-l", "beta"]);
-    assert!(
-        found.status.success() && text(&found.stdout).contains("b.rs"),
-        "{}",
-        text(&found.stdout)
-    );
+    settle(&root);
+    let out = refresh(&root, &home);
+    assert!(!skipped(&out), "should have rebuilt: {}", text(&out.stderr));
+    assert!(finds(&root, &home, "beta", "b.rs"));
 }
 
 #[test]
@@ -102,25 +115,273 @@ fn if_changed_rebuilds_after_an_uncommitted_edit() {
     assert!(run_from(CINDEX, &root, &home, &["--local"])
         .status
         .success());
-    // Edit without committing: HEAD is unchanged but the working tree is dirty,
-    // and the dirty fingerprint must still force a rebuild.
+    // Edit without committing: nothing git records has moved, and the edit
+    // must still force a rebuild.
     fs::write(root.join("a.rs"), "fn alpha() {}\nfn gamma() {}\n").unwrap();
+    settle(&root);
+    let out = refresh(&root, &home);
+    assert!(
+        !skipped(&out),
+        "an edited file must rebuild: {}",
+        text(&out.stderr)
+    );
+    assert!(finds(&root, &home, "gamma", "a.rs"));
+}
+
+#[test]
+fn if_changed_catches_a_second_edit_to_a_file_that_was_already_modified() {
+    // What comparing `git status` could not see: a file that is already
+    // "modified" stays "modified" however many more times it is edited, so
+    // the second edit left the index stale with nothing to say so.
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let (_dir, root, home) = scene();
+    fs::write(root.join("a.rs"), "fn alpha() {}\nfn first_edit() {}\n").unwrap();
+    settle(&root);
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    assert!(skipped(&refresh(&root, &home)));
+
+    fs::write(root.join("a.rs"), "fn alpha() {}\nfn second_edit() {}\n").unwrap();
+    settle(&root);
+    let out = refresh(&root, &home);
+    assert!(
+        !skipped(&out),
+        "the second edit went unnoticed: {}",
+        text(&out.stderr)
+    );
+    assert!(finds(&root, &home, "second_edit", "a.rs"));
+}
+
+#[test]
+fn a_commit_that_changes_no_file_needs_no_rebuild_and_leaves_no_stale_note() {
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let (_dir, root, home) = scene();
+    fs::write(root.join("b.rs"), "fn beta() {}\n").unwrap();
+    settle(&root);
+    // Indexed with the new file in place but not yet committed.
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+
+    // Committing it moves HEAD and touches nothing in the work tree...
+    assert!(git(&root, &["add", "-A"]));
+    assert!(git(&root, &["commit", "-q", "-m", "two"]));
+    // ...so a search right now is told the index is behind,
+    let out = run_from(CSEARCH, &root, &home, &["beta"]);
+    assert!(
+        text(&out.stderr).contains("behind HEAD"),
+        "{}",
+        text(&out.stderr)
+    );
+    // the refresh has nothing to rebuild,
+    let out = refresh(&root, &home);
+    assert!(
+        skipped(&out),
+        "no file changed, yet it rebuilt: {}",
+        text(&out.stderr)
+    );
+    // and having looked, it records where HEAD is now -- or the note would
+    // go on appearing after every search until some file happened to change.
+    let out = run_from(CSEARCH, &root, &home, &["beta"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stderr), "", "the note outlived the refresh");
+}
+
+#[test]
+fn if_changed_needs_no_version_control_at_all() {
+    // A plain directory used to be rebuilt every time: with only git to ask,
+    // a root that was not a repository could never be shown unchanged.
+    let (_dir, root, home) = plain_scene();
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    assert!(skipped(&refresh(&root, &home)), "unchanged, yet rebuilt");
+
+    // Each kind of change is seen, and seen once. Every write is settled
+    // before the refresh looks, so that nothing here is "too recent to trust"
+    // and only the comparison of the listings can explain a rebuild.
+    fs::write(root.join("a.txt"), "alpha and more\n").unwrap();
+    settle(&root);
+    assert!(!skipped(&refresh(&root, &home)), "an edit went unnoticed");
+    assert!(skipped(&refresh(&root, &home)));
+
+    fs::write(root.join("sub/new.txt"), "gamma\n").unwrap();
+    settle(&root);
+    assert!(
+        !skipped(&refresh(&root, &home)),
+        "a new file went unnoticed"
+    );
+    assert!(finds(&root, &home, "gamma", "new.txt"));
+    assert!(skipped(&refresh(&root, &home)));
+
+    fs::remove_file(root.join("sub/b.txt")).unwrap();
+    assert!(
+        !skipped(&refresh(&root, &home)),
+        "a deletion went unnoticed"
+    );
+    assert!(skipped(&refresh(&root, &home)));
+
+    fs::rename(root.join("a.txt"), root.join("renamed.txt")).unwrap();
+    assert!(!skipped(&refresh(&root, &home)), "a rename went unnoticed");
+    assert!(skipped(&refresh(&root, &home)));
+
+    // Same size, different time: an edit that kept the length. The time is
+    // set by hand -- as old as the others, but not the same -- so the size
+    // is equal, nothing is recent, and the timestamp is all there is to see.
+    let before = fs::metadata(root.join("renamed.txt")).unwrap();
+    fs::write(root.join("renamed.txt"), "ALPHA AND MORE\n").unwrap();
+    let earlier = before.modified().unwrap() - Duration::from_secs(20);
+    set_mtime(&root.join("renamed.txt"), earlier);
+    let after = fs::metadata(root.join("renamed.txt")).unwrap();
+    assert_eq!(after.len(), before.len(), "the edit must keep the size");
+    assert_ne!(after.modified().unwrap(), before.modified().unwrap());
+    assert!(
+        !skipped(&refresh(&root, &home)),
+        "a same-size edit went unnoticed"
+    );
+    assert!(finds(&root, &home, "ALPHA", "renamed.txt"));
+    assert!(skipped(&refresh(&root, &home)));
+}
+
+#[test]
+fn a_change_of_listing_is_a_change() {
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    // The same root with the same files in it is a different index when it
+    // is walked rather than listed through git.
+    let (_dir, root, home) = scene();
+    fs::write(root.join(".gitignore"), "ignored.rs\n").unwrap();
+    fs::write(root.join("ignored.rs"), "fn hidden() {}\n").unwrap();
+    assert!(git(&root, &["add", "-A"]));
+    assert!(git(&root, &["commit", "-q", "-m", "ignore"]));
+    settle(&root);
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    assert!(skipped(&refresh(&root, &home)));
+    assert!(!finds(&root, &home, "hidden", "ignored.rs"));
+
     let out = run_from(
         CINDEX,
         &root,
         &home,
-        &["--local", "--if-changed", "--verbose"],
+        &["--walk", "--if-changed", "--verbose"],
     );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!skipped(&out), "{}", text(&out.stderr));
+    assert!(finds(&root, &home, "hidden", "ignored.rs"));
+}
+
+#[test]
+fn the_stamp_describes_the_files_as_listed_not_as_they_are_after_the_build() {
+    // A file that changes while the build is running was read in one state
+    // or the other; either way it must not be recorded as indexed. The stamp
+    // used to be taken after the build, and recorded exactly that.
+    let (_dir, root, _home) = plain_scene();
+    let index = root.parent().unwrap().join("index");
+    let roots = [Root {
+        path: csearch::paths::canonical_string(&root).unwrap(),
+        source: Source::Walk,
+    }];
+    let opts = ListOptions {
+        max_file_bytes: MAX_FILE_LEN,
+        strict: false,
+    };
+
+    let listed = snapshot(&roots, &opts).unwrap();
+    // The build has listed the files and is about to read them...
+    fs::write(root.join("a.txt"), "alpha, changed mid-build\n").unwrap();
+    let built = build_from(&listed, &index, &BuildOptions::default()).unwrap();
+    stamp::write(&index, &listed, built.index_bytes);
+
+    // (Settled, so that the file is not merely "too recent to trust": the
+    // listings themselves have to differ.)
+    settle(&root);
+    let now = snapshot(&roots, &opts).unwrap();
+    assert_ne!(now.fingerprint, listed.fingerprint);
     assert!(
-        !text(&out.stderr).contains("up to date"),
-        "dirty tree must rebuild: {}",
+        matches!(stamp::check(&index, &now).0, Verdict::Stale(_)),
+        "a file modified during the build was recorded as indexed"
+    );
+
+    // With nothing happening in between, the same sequence is current. (The
+    // file just written is settled first: on a file system with whole-second
+    // timestamps it would otherwise be too recent to vouch for.)
+    settle(&root);
+    let listed = snapshot(&roots, &opts).unwrap();
+    let built = build_from(&listed, &index, &BuildOptions::default()).unwrap();
+    stamp::write(&index, &listed, built.index_bytes);
+    let now = snapshot(&roots, &opts).unwrap();
+    assert_eq!(stamp::check(&index, &now).0, Verdict::Current);
+}
+
+/// The start of a second, `offset` seconds from the current one: a timestamp
+/// as a file system that keeps whole seconds would store it.
+fn whole_second(offset: i64) -> SystemTime {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    UNIX_EPOCH + Duration::from_secs(now.as_secs().checked_add_signed(offset).unwrap())
+}
+
+#[test]
+fn whole_second_timestamps_are_not_trusted_near_the_build() {
+    // FAT keeps two-second timestamps, HFS+ and ext3 whole seconds. There, a
+    // file written just before the build and again just after it can show
+    // the same size and the same time, so "nothing changed" is not provable
+    // for anything modified within a tick of the build.
+    let (_dir, root, home) = plain_scene();
+    let files = [root.join("a.txt"), root.join("sub/b.txt")];
+
+    // Every timestamp on a whole second, and one of them not safely older
+    // than the build. (A few seconds ahead rather than "just now", so the
+    // test does not depend on how quickly the indexer starts.)
+    set_mtime(&files[0], whole_second(-40));
+    set_mtime(&files[1], whole_second(3));
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    let out = refresh(&root, &home);
+    assert!(
+        !skipped(&out),
+        "trusted a whole-second timestamp no older than the build: {}",
         text(&out.stderr)
     );
-    let found = run_from(CSEARCH, &root, &home, &["-l", "gamma"]);
     assert!(
-        text(&found.stdout).contains("a.rs"),
+        text(&out.stderr).contains("too close"),
         "{}",
-        text(&found.stdout)
+        text(&out.stderr)
+    );
+
+    // The same files, long settled: now it can be believed.
+    set_mtime(&files[1], whole_second(-30));
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    assert!(skipped(&refresh(&root, &home)), "old files, yet rebuilt");
+
+    // And where the file system does keep fractions of a second, a file as
+    // recent as the first one is no reason to rebuild: a single sub-second
+    // timestamp shows what the file system can do.
+    let fine = whole_second(3) + Duration::from_millis(250);
+    set_mtime(&files[1], fine);
+    if fs::metadata(&files[1]).unwrap().modified().unwrap() != fine {
+        eprintln!("skipping the last part: this file system rounded a 250 ms timestamp");
+        return;
+    }
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    assert!(
+        skipped(&refresh(&root, &home)),
+        "a file system with sub-second timestamps was treated as coarse"
     );
 }
 
@@ -189,12 +450,7 @@ fn install_hooks_writes_four_hooks_and_the_initial_index() {
     }
     // install-hooks implies --local, so the index exists and is searchable now.
     assert!(root.join(INDEX_FILE_NAME).is_file());
-    let found = run_from(CSEARCH, &root, &home, &["-l", "alpha"]);
-    assert!(
-        text(&found.stdout).contains("a.rs"),
-        "{}",
-        text(&found.stdout)
-    );
+    assert!(finds(&root, &home, "alpha", "a.rs"));
 }
 
 #[test]
@@ -303,11 +559,8 @@ fn background_returns_at_once_and_the_index_appears() {
     // succeed rather than for the file, so we never read a half-written index.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if index.is_file() {
-            let found = run_from(CSEARCH, &root, &home, &["-l", "alpha"]);
-            if found.status.success() && text(&found.stdout).contains("a.rs") {
-                break;
-            }
+        if index.is_file() && finds(&root, &home, "alpha", "a.rs") {
+            break;
         }
         assert!(Instant::now() < deadline, "background index never appeared");
         std::thread::sleep(Duration::from_millis(100));
