@@ -1,10 +1,18 @@
 //! A damaged index must be reported, never panic. The release profile aborts
 //! on panic, which on Windows means a crash dialog instead of an error.
 
+use csearch::names::CINDEX;
 use csearch::read::Index;
 use csearch::write::{build_index, BuildOptions, MAGIC, TRAILER_LEN};
 use std::fs;
 use tempfile::TempDir;
+
+/// What every "this index is damaged" message must end by suggesting -- with
+/// this project's indexer named, since `cindex --reset` would be the
+/// original's, and would delete a different file.
+fn reset_hint() -> String {
+    format!("run `{CINDEX} --reset`")
+}
 
 fn fresh() -> (TempDir, Vec<u8>) {
     let dir = tempfile::tempdir().unwrap();
@@ -57,7 +65,7 @@ fn truncation_is_reported() {
     ] {
         let err = open_err(&dir, &format!("cut{cut}"), &bytes[..cut]);
         assert!(
-            err.contains("cindex --reset") || err.contains("not a csearch-rs index"),
+            err.contains(&reset_hint()) || err.contains("not a csearch-rs index"),
             "cut at {cut}: {err}"
         );
     }
@@ -72,10 +80,7 @@ fn every_trailer_offset_is_validated() {
             let mut b = bytes.clone();
             b[t + field * 8..t + field * 8 + 8].copy_from_slice(&bad.to_le_bytes());
             let err = open_err(&dir, &format!("off{field}_{bad}"), &b);
-            assert!(
-                err.contains("cindex --reset"),
-                "offset {field} = {bad}: {err}"
-            );
+            assert!(err.contains(&reset_hint()), "offset {field} = {bad}: {err}");
         }
     }
 }
@@ -88,7 +93,7 @@ fn counts_are_validated() {
         let mut b = bytes.clone();
         b[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         let err = open_err(&dir, label, &b);
-        assert!(err.contains("cindex --reset"), "{label}: {err}");
+        assert!(err.contains(&reset_hint()), "{label}: {err}");
     }
 }
 
@@ -102,18 +107,18 @@ fn index_entries_are_validated() {
     let mut b = bytes.clone();
     b[nameidx_off..nameidx_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
     let err = open_err(&dir, "nameidx", &b);
-    assert!(err.contains("cindex --reset"), "{err}");
+    assert!(err.contains(&reset_hint()), "{err}");
 
     let mut b = bytes.clone();
     b[postidx_off + 8..postidx_off + 16].copy_from_slice(&(u64::MAX / 4).to_le_bytes());
     let err = open_err(&dir, "postidx", &b);
-    assert!(err.contains("cindex --reset"), "{err}");
+    assert!(err.contains(&reset_hint()), "{err}");
 
     // Unsorted trigrams would make the binary search meaningless.
     let mut b = bytes.clone();
     b[postidx_off..postidx_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
     let err = open_err(&dir, "unsorted", &b);
-    assert!(err.contains("cindex --reset"), "{err}");
+    assert!(err.contains(&reset_hint()), "{err}");
 }
 
 #[test]

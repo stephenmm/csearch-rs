@@ -5,17 +5,14 @@
 //! panicking part-way through a query (the release profile aborts on panic,
 //! which on Windows is a crash dialog, not an error message).
 
+use crate::names::CINDEX;
 use crate::query::{Op, Query};
 use crate::varint;
-use crate::write::{MAGIC, POST_ENTRY_LEN, TRAILER_LEN, TRAILER_MAGIC};
+use crate::write::{MAGIC, MAGIC_FAMILY, POST_ENTRY_LEN, TRAILER_LEN, TRAILER_MAGIC};
 use anyhow::{anyhow, bail, Context, Result};
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
-
-/// Every format version starts with this; only the current one matches
-/// `MAGIC` in full.
-const MAGIC_FAMILY: &[u8] = b"csearch-rs index ";
 
 pub struct Index {
     map: Mmap,
@@ -41,7 +38,7 @@ impl Index {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 bail!(
-                    "no index at {} -- run `cindex <dir>` to create one",
+                    "no index at {} -- run `{CINDEX} <dir>` to create one",
                     path.display()
                 )
             }
@@ -52,7 +49,7 @@ impl Index {
         let map = unsafe { Mmap::map(&f)? };
         let corrupt = |what: &str| {
             anyhow!(
-                "{}: {what} -- the index is corrupt; run `cindex --reset` and re-index",
+                "{}: {what} -- the index is corrupt; run `{CINDEX} --reset` and re-index",
                 path.display()
             )
         };
@@ -60,7 +57,7 @@ impl Index {
         if !map.starts_with(MAGIC) {
             if map.starts_with(MAGIC_FAMILY) {
                 bail!(
-                    "{}: written by a different index format version -- run `cindex --reset` and re-index",
+                    "{}: written by a different index format version -- run `{CINDEX} --reset` and re-index",
                     path.display()
                 );
             }

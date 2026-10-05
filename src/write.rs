@@ -19,6 +19,7 @@
 //!                "CSRSIDX1"
 //! ```
 
+use crate::names::CINDEX;
 use crate::paths::{canonical_string, strip_verbatim};
 use crate::trigram::{self, MAX_FILE_LEN};
 use crate::varint;
@@ -32,6 +33,10 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 pub const MAGIC: &[u8] = b"csearch-rs index 1\n";
+/// Every format version starts with this; only the current one matches
+/// `MAGIC` in full. It is also what tells an index of ours from one written
+/// by the original csearch, whose magic is `csearch index`.
+pub const MAGIC_FAMILY: &[u8] = b"csearch-rs index ";
 pub const TRAILER_MAGIC: &[u8; 8] = b"CSRSIDX1";
 pub const TRAILER_LEN: usize = 5 * 8 + 4 + 4 + 8;
 pub const POST_ENTRY_LEN: usize = 16;
@@ -199,7 +204,7 @@ fn walk(roots: &[String], max_file_bytes: u64) -> (Vec<(PathBuf, u64)>, usize) {
                 Err(err) => {
                     // A directory we cannot enter is worth a line even without
                     // --verbose; the user would otherwise never know.
-                    eprintln!("cindex: {err}");
+                    eprintln!("{CINDEX}: {err}");
                     continue;
                 }
             };
@@ -209,7 +214,7 @@ fn walk(roots: &[String], max_file_bytes: u64) -> (Vec<(PathBuf, u64)>, usize) {
             let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
             if len > max_file_bytes {
                 eprintln!(
-                    "cindex: {}: {len} bytes is over the {max_file_bytes}-byte limit, skipping",
+                    "{CINDEX}: {}: {len} bytes is over the {max_file_bytes}-byte limit, skipping",
                     entry.path().display()
                 );
                 too_large += 1;
@@ -286,7 +291,7 @@ fn collect_files(roots: &[String], opts: &BuildOptions) -> (Vec<(PathBuf, u64)>,
         let listed = match git_files(root) {
             GitList::Files(f) => f,
             GitList::NotARepo => {
-                eprintln!("cindex: {root}: not a git work tree, walking the directory instead");
+                eprintln!("{CINDEX}: {root}: not a git work tree, walking the directory instead");
                 let (walked, n) = walk(std::slice::from_ref(root), opts.max_file_bytes);
                 files.extend(walked);
                 too_large += n;
@@ -295,9 +300,9 @@ fn collect_files(roots: &[String], opts: &BuildOptions) -> (Vec<(PathBuf, u64)>,
             GitList::Unavailable(msg) => {
                 // Show git's own words: silently walking would index the very
                 // files --git was meant to exclude, so the user should see why.
-                eprintln!("cindex: {root}: could not use git, walking the directory instead");
+                eprintln!("{CINDEX}: {root}: could not use git, walking the directory instead");
                 for line in msg.lines() {
-                    eprintln!("cindex:   {line}");
+                    eprintln!("{CINDEX}:   {line}");
                 }
                 let (walked, n) = walk(std::slice::from_ref(root), opts.max_file_bytes);
                 files.extend(walked);
@@ -328,7 +333,7 @@ fn collect_files(roots: &[String], opts: &BuildOptions) -> (Vec<(PathBuf, u64)>,
             let len = meta.len();
             if len > opts.max_file_bytes {
                 eprintln!(
-                    "cindex: {}: {len} bytes is over the {}-byte limit, skipping",
+                    "{CINDEX}: {}: {len} bytes is over the {}-byte limit, skipping",
                     path.display(),
                     opts.max_file_bytes
                 );
@@ -353,7 +358,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
     }
     let (root_strs, dropped) = collapse_roots(root_strs);
     for (child, parent) in &dropped {
-        eprintln!("cindex: {child} is inside {parent}, not indexing it twice");
+        eprintln!("{CINDEX}: {child} is inside {parent}, not indexing it twice");
     }
 
     let (files, too_large) = collect_files(&root_strs, opts);
@@ -364,7 +369,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
     };
     if opts.verbose {
         eprintln!(
-            "cindex: {} files found in {:.2?}",
+            "{CINDEX}: {} files found in {:.2?}",
             files.len(),
             t0.elapsed()
         );
@@ -399,7 +404,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
                     Err(err) => {
                         // Always reported: unlike a binary file, an unreadable
                         // one is rare and something the user can act on.
-                        eprintln!("cindex: {}: {err}", path.display());
+                        eprintln!("{CINDEX}: {}: {err}", path.display());
                         return None;
                     }
                 };
@@ -410,7 +415,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
                     }
                     Err(skip) => {
                         if opts.verbose {
-                            eprintln!("cindex: {}: {skip}, skipping", path.display());
+                            eprintln!("{CINDEX}: {}: {skip}, skipping", path.display());
                         }
                         None
                     }
@@ -447,7 +452,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
 
         if opts.verbose {
             eprintln!(
-                "cindex: {}/{} files, {} distinct trigrams, {:.2?}",
+                "{CINDEX}: {}/{} files, {} distinct trigrams, {:.2?}",
                 names.len() + stats.files_skipped,
                 files.len(),
                 postings.len(),
@@ -484,7 +489,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
 
     if opts.verbose {
         eprintln!(
-            "cindex: wrote {} ({} bytes, {} files, {} trigrams) in {:.2?}",
+            "{CINDEX}: wrote {} ({} bytes, {} files, {} trigrams) in {:.2?}",
             out.display(),
             off,
             names.len(),
@@ -576,7 +581,7 @@ fn replace_file(tmp: &Path, out: &Path) -> Result<()> {
         let had_old = out.is_file();
         if had_old {
             // Fails only for a reader that opened the file without
-            // FILE_SHARE_DELETE (not csearch, which shares it); nothing in
+            // FILE_SHARE_DELETE (not csearch-rs, which shares it); nothing in
             // user space can move such a file, so say what to do.
             fs::rename(out, &old).context(
                 "another program has the index open in a way that blocks replacing it; close it and re-run",
@@ -659,7 +664,7 @@ mod tests {
         let out = dir.path().join("index");
         build_index(std::slice::from_ref(&root), &out, &BuildOptions::default()).unwrap();
 
-        // A running csearch holds the index mapped; a rebuild must still
+        // A running csearch-rs holds the index mapped; a rebuild must still
         // succeed, and the old mapping must stay readable.
         let held = crate::read::Index::open(&out).unwrap();
         fs::write(root.join("b.txt"), "second\n").unwrap();

@@ -1,10 +1,11 @@
-//! csearch — regexp search over a cindex index.
+//! csearch-rs — regexp search over a cindex-rs index.
 //!
-//!   csearch [-c] [-f FILEREGEXP] [-h] [-i] [-l] [-n] [--brute] [--verbose] REGEXP
+//!   csearch-rs [-c] [-f FILEREGEXP] [-h] [-i] [-l] [-n] [--brute] [--verbose] REGEXP
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
-use csearch::paths::default_index_path;
+use csearch::names::{CINDEX, CSEARCH};
+use csearch::paths::{default_index_path, with_upgrade_notes};
 use csearch::read::Index;
 use csearch::regexp;
 use rayon::prelude::*;
@@ -16,7 +17,7 @@ use std::time::Instant;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "csearch",
+    name = CSEARCH,
     version,
     about = "Search code with a trigram index",
     disable_help_flag = true
@@ -50,7 +51,9 @@ struct Args {
     // which a trigram index cannot do. An error beats a silent misread.
     #[arg(long)]
     verbose: bool,
-    /// Index file (default: $CSEARCHINDEX or ~/.csearchindex).
+    /// Index file (default: $CSEARCH_RS_INDEX, else the nearest
+    /// .csearch-rs-index above the working directory, else
+    /// ~/.csearch-rs-index).
     #[arg(long)]
     indexpath: Option<PathBuf>,
     /// Worker threads (default: all cores).
@@ -157,7 +160,7 @@ fn grep_chunk(grep: &Grep, names: &[&str]) -> Vec<(Vec<u8>, usize)> {
     names.par_iter().map(|n| grep.file(n)).collect()
 }
 
-/// `csearch ... | head` closes our stdout early. That is the reader being
+/// `csearch-rs ... | head` closes our stdout early. That is the reader being
 /// done, not a failure: exit quietly and successfully, as grep and ripgrep
 /// do, instead of printing "Broken pipe".
 fn quiet_on_closed_pipe(result: io::Result<()>) -> io::Result<()> {
@@ -207,7 +210,15 @@ fn run() -> Result<i32> {
     if args.verbose {
         eprintln!("index: {}", index_path.display());
     }
-    let idx = Index::open(&index_path)?;
+    let idx = Index::open(&index_path).map_err(|e| {
+        // No index at all is how an upgrade from 0.2 first shows itself: the
+        // old one is still there, under the original csearch's file name.
+        if index_path.exists() {
+            e
+        } else {
+            with_upgrade_notes(e)
+        }
+    })?;
     // One cheap line if a git root has moved since the index was built, so a
     // stale result set is never silently trusted. HEAD-only, so it adds a
     // single `git rev-parse` per stamped root and nothing for non-git indexes.
@@ -252,7 +263,7 @@ fn run() -> Result<i32> {
     // Grep in chunks, in candidate (path) order, writing each chunk while
     // rayon greps the next one. Memory is bounded by two chunks of output
     // rather than every match in the corpus, and the first lines appear as
-    // soon as the first chunk is done -- both matter for `csearch . | head`.
+    // soon as the first chunk is done -- both matter for `csearch-rs . | head`.
     // Stdout is not locked across the loop: a lock guard is not Send, and the
     // writer runs inside rayon::join.
     let mut w = io::BufWriter::with_capacity(1 << 16, io::stdout());
@@ -285,11 +296,11 @@ fn run() -> Result<i32> {
     let unreadable = grep.unreadable.load(Ordering::Relaxed);
     if missing > 0 {
         eprintln!(
-            "csearch: {missing} indexed file(s) no longer exist -- run cindex to refresh the index"
+            "{CSEARCH}: {missing} indexed file(s) no longer exist -- run {CINDEX} to refresh the index"
         );
     }
     if unreadable > 0 {
-        eprintln!("csearch: {unreadable} indexed file(s) could not be read");
+        eprintln!("{CSEARCH}: {unreadable} indexed file(s) could not be read");
     }
     if args.verbose {
         eprintln!("{total} matches in {files} files ({:.2?})", t0.elapsed());

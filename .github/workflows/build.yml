@@ -90,6 +90,27 @@ jobs:
         if: runner.os == 'macOS'
         run: softwareupdate --install-rosetta --agree-to-license
 
+      # The original codesearch, so tests/coexist.rs can run the two side by
+      # side in one home directory for real rather than against stand-ins.
+      # Pinned: the test identifies the original by its usage text, and an
+      # upstream change to that should be met on purpose, not by a red build
+      # on somebody's unrelated pull request. CSEARCH_RS_REQUIRE_ORIGINAL
+      # turns "not installed" from a skip into a failure, so this leg can
+      # never quietly stop running that test.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install the original codesearch
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install github.com/google/codesearch/cmd/cindex@v1.2.0
+          go install github.com/google/codesearch/cmd/csearch@v1.2.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          echo "CSEARCH_RS_REQUIRE_ORIGINAL=1" >> "$GITHUB_ENV"
+
       # Lint before testing so a style or clippy failure surfaces in seconds.
       # fmt is platform-independent, so once is enough; clippy runs on both
       # legs because cfg(windows) code is only linted where it compiles.
@@ -119,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           cd target/${{ matrix.target }}/release
-          for b in cindex csearch; do
+          for b in cindex-rs csearch-rs; do
             file "$b"
             file "$b" | grep -q 'static-pie linked\|statically linked' \
               || { echo "FAIL: $b is not statically linked"; exit 1; }
@@ -136,7 +157,7 @@ jobs:
                   -latest -products * -property installationPath
           $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
                      Where-Object FullName -match 'Hostx64\\x64' | Select-Object -First 1
-          foreach ($b in 'cindex', 'csearch') {
+          foreach ($b in 'cindex-rs', 'csearch-rs') {
             $exe = "target/${{ matrix.target }}/release/$b.exe"
             $out = & $dumpbin.FullName /dependents $exe
             $crt = $out | Select-String -Pattern 'vcruntime|api-ms-win-crt|msvcp'
@@ -153,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           cd target/${{ matrix.target }}/release
-          for b in cindex csearch; do
+          for b in cindex-rs csearch-rs; do
             file "$b"
             otool -L "$b"
             if otool -L "$b" | tail -n +2 | awk '{print $1}' | grep -qvE '^(/usr/lib/|/System/)'; then
@@ -174,11 +195,11 @@ jobs:
           cd target/${{ matrix.target }}/release
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "../../../dist/csearch-rs-${{ matrix.name }}.zip" \
-              cindex.exe csearch.exe LICENSE README.md
+              cindex-rs.exe csearch-rs.exe LICENSE README.md
           else
-            strip cindex csearch || true
+            strip cindex-rs csearch-rs || true
             tar czf "../../../dist/csearch-rs-${{ matrix.name }}.tar.gz" \
-              cindex csearch LICENSE README.md
+              cindex-rs csearch-rs LICENSE README.md
           fi
 
       - uses: actions/upload-artifact@v7

@@ -7,7 +7,7 @@
 //! subtle bug would produce one. So this generates random corpora and random
 //! patterns from a grammar that covers those features, and checks that every
 //! real match is a candidate. It is deterministic: a failure prints the seed
-//! and pattern that reproduce it. `CSEARCH_PROP_ITERS=50 cargo test --test
+//! and pattern that reproduce it. `CSEARCH_RS_PROP_ITERS=50 cargo test --test
 //! superset` runs more corpora.
 
 use csearch::read::Index;
@@ -140,7 +140,7 @@ fn pattern(rng: &mut Rng, files: &[Vec<u8>]) -> (String, bool) {
 
 #[test]
 fn candidates_are_a_superset_of_true_matches() {
-    let corpora: u64 = std::env::var("CSEARCH_PROP_ITERS")
+    let corpora: u64 = std::env::var("CSEARCH_RS_PROP_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8);

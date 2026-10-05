@@ -1,22 +1,25 @@
-//! cindex — build the trigram index.
+//! cindex-rs — build the trigram index.
 //!
-//!   cindex [--verbose] [--indexpath FILE] [-j N] [PATH...]
-//!   cindex --local            per-project index at the repository root
-//!   cindex --if-changed       rebuild only if a git root has changed
-//!   cindex --install-hooks    keep the local index fresh on every git event
-//!   cindex --uninstall-hooks  remove those hooks
-//!   cindex --remove PATH      drop a root from the index and rebuild
-//!   cindex --list             show indexed roots
-//!   cindex --reset            delete the index
+//!   cindex-rs [--verbose] [--indexpath FILE] [-j N] [PATH...]
+//!   cindex-rs --local            per-project index at the repository root
+//!   cindex-rs --if-changed       rebuild only if a git root has changed
+//!   cindex-rs --install-hooks    keep the local index fresh on every git event
+//!   cindex-rs --uninstall-hooks  remove those hooks
+//!   cindex-rs --remove PATH      drop a root from the index and rebuild
+//!   cindex-rs --list             show indexed roots
+//!   cindex-rs --reset            delete the index
 //!
 //! With paths, they are added to the set of roots and the whole index is
 //! rebuilt in parallel. With no paths, the existing roots are re-indexed. The
 //! index is found by the rule in `csearch::paths::default_index_path`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use csearch::gitstate;
-use csearch::paths::{default_index_path, find_repo_root, INDEX_FILE_NAME};
+use csearch::names::CINDEX;
+use csearch::paths::{
+    default_index_path, find_repo_root, legacy_index_beside, with_upgrade_notes, INDEX_FILE_NAME,
+};
 use csearch::read::Index;
 use csearch::write::{build_index, resolve_roots, BuildOptions};
 use std::fs;
@@ -25,15 +28,18 @@ use std::process::{Command, Stdio};
 
 /// Env guard: set on the detached child so `--background` does not re-detach
 /// forever.
-const NO_DETACH: &str = "CSEARCH_NO_DETACH";
+const NO_DETACH: &str = "CSEARCH_RS_NO_DETACH";
 
 /// The git events whose hooks keep the index fresh: a checkout, a merge/pull,
 /// a commit, and history rewrites (rebase, amend, filter).
 const HOOKS: &[&str] = &["post-checkout", "post-merge", "post-commit", "post-rewrite"];
+/// Marks a hook file as ours. It is the project's name rather than a binary's,
+/// so hooks installed before the binaries were renamed are still recognised
+/// -- and are refreshed, or removed, like any other.
 const HOOK_MARKER: &str = "csearch-rs";
 
 #[derive(Parser, Debug)]
-#[command(name = "cindex", version, about = "Build a trigram index for csearch")]
+#[command(name = CINDEX, version, about = "Build a trigram index for csearch-rs")]
 struct Args {
     /// List the paths currently in the index and exit.
     #[arg(long)]
@@ -45,7 +51,7 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     remove: Vec<PathBuf>,
     /// Index the enclosing repository (or the current directory) into a
-    /// `.csearchindex` at its root, kept out of git's sight via
+    /// `.csearch-rs-index` at its root, kept out of git's sight via
     /// info/exclude. Implies --git.
     #[arg(long)]
     local: bool,
@@ -72,8 +78,9 @@ struct Args {
     /// Print progress and skipped files.
     #[arg(long, short = 'v')]
     verbose: bool,
-    /// Index file (default: $CSEARCHINDEX, else the nearest .csearchindex
-    /// above the working directory, else ~/.csearchindex).
+    /// Index file (default: $CSEARCH_RS_INDEX, else the nearest
+    /// .csearch-rs-index above the working directory, else
+    /// ~/.csearch-rs-index).
     #[arg(long)]
     indexpath: Option<PathBuf>,
     /// Worker threads (default: all cores).
@@ -158,7 +165,7 @@ fn install_hooks(root: &Path) -> Result<()> {
         if let Ok(existing) = fs::read_to_string(&path) {
             if !existing.contains(HOOK_MARKER) {
                 eprintln!(
-                    "cindex: {} already exists and is not ours -- leaving it alone",
+                    "{CINDEX}: {} already exists and is not ours -- leaving it alone",
                     path.display()
                 );
                 continue;
@@ -172,7 +179,7 @@ fn install_hooks(root: &Path) -> Result<()> {
                 .with_context(|| format!("chmod {}", path.display()))?;
         }
     }
-    eprintln!("cindex: installed refresh hooks in {}", dir.display());
+    eprintln!("{CINDEX}: installed refresh hooks in {}", dir.display());
     Ok(())
 }
 
@@ -191,7 +198,7 @@ fn uninstall_hooks(root: &Path) -> Result<()> {
         }
     }
     eprintln!(
-        "cindex: removed {removed} refresh hook(s) from {}",
+        "{CINDEX}: removed {removed} refresh hook(s) from {}",
         dir.display()
     );
     Ok(())
@@ -258,7 +265,7 @@ fn main() -> Result<()> {
     // first stamp would see them and a later --if-changed never matches.
     if let Some(r) = &root {
         if let Some(exclude) = exclude_index_from_git(r)? {
-            eprintln!("cindex: added {INDEX_FILE_NAME} to {}", exclude.display());
+            eprintln!("{CINDEX}: added {INDEX_FILE_NAME} to {}", exclude.display());
         }
     }
 
@@ -279,14 +286,16 @@ fn main() -> Result<()> {
     }
     let plan = resolve_roots(&stored, &add, &args.remove)?;
     for note in &plan.notes {
-        eprintln!("cindex: {note}");
+        eprintln!("{CINDEX}: {note}");
     }
     if plan.roots.is_empty() {
         if stored.is_empty() {
-            bail!(
+            // The one place an upgrade from 0.2 shows up as a puzzle: the
+            // index is "gone" because it is still under the original's name.
+            return Err(with_upgrade_notes(anyhow!(
                 "no paths given and no existing index at {}",
                 index_path.display()
-            );
+            )));
         }
         bail!("no roots left to index; use --reset to delete the index");
     }
@@ -299,7 +308,7 @@ fn main() -> Result<()> {
         if let Some(target) = target {
             if gitstate::is_current(&index_path, &target) {
                 if args.verbose {
-                    eprintln!("cindex: index is up to date, nothing to do");
+                    eprintln!("{CINDEX}: index is up to date, nothing to do");
                 }
                 return Ok(());
             }
@@ -314,7 +323,7 @@ fn main() -> Result<()> {
     };
     let stats = build_index(&plan.roots, &index_path, &opts)?;
     eprintln!(
-        "cindex: {} files indexed ({} skipped), {} trigrams, {} posting entries, index {} bytes",
+        "{CINDEX}: {} files indexed ({} skipped), {} trigrams, {} posting entries, index {} bytes",
         stats.files_indexed,
         stats.files_skipped,
         stats.distinct_trigrams,
@@ -322,13 +331,22 @@ fn main() -> Result<()> {
         stats.index_bytes
     );
 
-    // Record git state so the next --if-changed can skip and csearch can warn.
-    // Use the roots as stored, so the strings match what a later run sees.
+    // Record git state so the next --if-changed can skip and csearch-rs can
+    // warn. Use the roots as stored, so the strings match what a later run sees.
     let stored_now = Index::open(&index_path)?.roots();
     gitstate::write_stamp(&index_path, &stored_now);
 
     if root.is_some() {
-        eprintln!("cindex: local index at {}", index_path.display());
+        eprintln!("{CINDEX}: local index at {}", index_path.display());
+    }
+    // An index csearch-rs 0.2 left here under the original's name is dead
+    // weight now. Say so; never delete it -- that name is not ours any more.
+    if let Some(old) = legacy_index_beside(&index_path) {
+        eprintln!(
+            "{CINDEX}: note: {} is a csearch-rs index from before 0.3 and is no longer \
+             used -- delete it (and its .meta) when convenient",
+            old.display()
+        );
     }
     Ok(())
 }
