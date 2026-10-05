@@ -95,6 +95,41 @@ pub struct ListOptions {
     pub strict: bool,
 }
 
+/// Variables through which git tells a hook, and anything the hook starts,
+/// which repository it is running for. This is git's own list of them
+/// (`git rev-parse --local-env-vars`), less the ones that carry configuration
+/// rather than a location.
+const GIT_REPOSITORY_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// A `git` command that will look at the repository it is pointed at with
+/// `-C`, and at no other.
+///
+/// A refresh is often started from a git hook, and a hook's environment
+/// names the repository the hook belongs to. Inherited, that overrides `-C`:
+/// asked about some other root, git would answer for the hook's repository
+/// -- its index, its `info/exclude` -- and the wrong files would be listed,
+/// or the wrong repository's exclude file written to.
+pub fn git() -> Command {
+    let mut cmd = Command::new("git");
+    for var in GIT_REPOSITORY_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 fn skip_name(name: &str) -> bool {
     name.starts_with('.') || name.starts_with('#') || name.starts_with('~') || name.ends_with('~')
 }
@@ -202,7 +237,7 @@ enum GitList {
 /// What git considers part of the work tree under `root`: tracked files plus
 /// untracked-but-not-ignored ones -- what a developer means by "the repo".
 fn git_files(root: &str) -> GitList {
-    let out = match Command::new("git")
+    let out = match git()
         .args([
             "-C",
             root,

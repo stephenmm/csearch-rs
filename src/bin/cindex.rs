@@ -16,7 +16,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
-use csearch::listing::{snapshot, ListOptions, Root, Source};
+use csearch::listing::{self, snapshot, ListOptions, Root, Source};
 use csearch::lock;
 use csearch::names::CINDEX;
 use csearch::paths::{
@@ -167,7 +167,7 @@ fn keep_our_stdio_to_ourselves() {
 fn hooks_dir(root: &Path) -> Option<PathBuf> {
     let root_s = root.to_str()?;
     let run = |args: &[&str]| -> Option<String> {
-        let out = Command::new("git")
+        let out = listing::git()
             .arg("-C")
             .arg(root_s)
             .args(args)
@@ -488,7 +488,7 @@ fn stored_roots(index_path: &Path) -> Result<Vec<Root>> {
 /// Ask git where `info/exclude` is (correct for worktrees), falling back to
 /// `.git/info/exclude`.
 fn git_exclude_path(root: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
+    let out = listing::git()
         .arg("-C")
         .arg(root)
         .args(["rev-parse", "--git-path", "info/exclude"])
