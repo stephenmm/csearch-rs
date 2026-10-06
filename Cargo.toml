@@ -1,6 +1,6 @@
 [package]
 name = "csearch-rs"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Rust port of Google Code Search (cindex/csearch) with SIMD trigram extraction and parallel indexing/search"
