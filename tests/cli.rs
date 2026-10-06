@@ -1,30 +1,22 @@
-//! End-to-end tests that drive the real `cindex` and `csearch` binaries.
+//! End-to-end tests that drive the real `cindex-rs` and `csearch-rs` binaries.
 //!
 //! These exist because every bug they cover was invisible to the unit tests:
 //! the defects were in how the binaries stitch the library together.
 
+mod common;
+
+use common::{have_git, run_from, sealed, text, with_index, CINDEX, CSEARCH};
+use csearch::names::{self, INDEX_ENV, INDEX_FILE_NAME};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn cindex(index: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_cindex"))
-        .env("CSEARCHINDEX", index)
-        .args(args)
-        .output()
-        .expect("run cindex")
+    with_index(CINDEX, index, args)
 }
 
 fn csearch(index: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_csearch"))
-        .env("CSEARCHINDEX", index)
-        .args(args)
-        .output()
-        .expect("run csearch")
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+    with_index(CSEARCH, index, args)
 }
 
 #[test]
@@ -38,7 +30,7 @@ fn nested_roots_do_not_duplicate_results() {
 
     assert!(cindex(&index, &[root.to_str().unwrap()]).status.success());
     // The original bug: adding a subdirectory of an existing root indexed
-    // every file under it a second time, and csearch printed each twice.
+    // every file under it a second time, and csearch-rs printed each twice.
     let out = cindex(&index, &[root.join("sub").to_str().unwrap()]);
     assert!(out.status.success());
     assert!(
@@ -69,7 +61,13 @@ fn missing_index_says_how_to_create_one() {
     let out = csearch(&dir.path().join("none"), &["foo"]);
     assert_eq!(out.status.code(), Some(2), "an error, not 'no match'");
     let err = text(&out.stderr);
-    assert!(err.contains("cindex"), "no hint to run cindex: {err}");
+    // The command it names has to be one that exists: this project's indexer,
+    // not the original's.
+    assert!(
+        err.contains(&format!("run `{} <dir>`", names::CINDEX)),
+        "no hint to run {}: {err}",
+        names::CINDEX
+    );
     assert!(!err.contains("os error"), "raw OS error leaked: {err}");
 }
 
@@ -85,7 +83,7 @@ fn short_v_is_rejected() {
 
 #[test]
 fn closed_stdout_is_not_an_error() {
-    // `csearch pattern | head -1`: the reader goes away after one line and
+    // `csearch-rs pattern | head -1`: the reader goes away after one line and
     // every further write fails with a broken pipe. That must be a quiet,
     // successful exit -- not "Error: Broken pipe (os error 32)".
     let dir = tempfile::tempdir().unwrap();
@@ -98,8 +96,8 @@ fn closed_stdout_is_not_an_error() {
     let index = dir.path().join("index");
     assert!(cindex(&index, &[root.to_str().unwrap()]).status.success());
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_csearch"))
-        .env("CSEARCHINDEX", &index)
+    let mut child = sealed(CSEARCH)
+        .env(INDEX_ENV, &index)
         .arg("needle")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -129,7 +127,7 @@ fn vanished_root_does_not_wedge_the_index() {
     );
     fs::remove_dir_all(&gone).unwrap();
 
-    // The original bug: one deleted root made every cindex run fail, even
+    // The original bug: one deleted root made every cindex-rs run fail, even
     // one that only wanted to add a different path, until --reset.
     let out = cindex(&index, &[]);
     assert!(out.status.success(), "{}", text(&out.stderr));
@@ -199,7 +197,10 @@ fn corrupt_index_is_reported_not_crashed() {
         out.status
     );
     let err = text(&out.stderr);
-    assert!(err.contains("cindex --reset"), "{err}");
+    assert!(
+        err.contains(&format!("run `{} --reset`", names::CINDEX)),
+        "{err}"
+    );
     assert!(!err.contains("panicked"), "{err}");
 }
 
@@ -240,8 +241,61 @@ fn deleted_file_is_reported_once() {
     assert!(out.status.success());
     assert_eq!(text(&out.stdout).lines().count(), 1);
     let err = text(&out.stderr);
-    assert!(err.contains("1 indexed file(s) no longer exist"), "{err}");
-    assert!(err.contains("cindex"), "no hint to re-index: {err}");
+    assert_eq!(
+        err.trim_end(),
+        format!(
+            "{}: 1 indexed file(s) no longer exist -- run {} to refresh the index",
+            names::CSEARCH,
+            names::CINDEX
+        )
+    );
+}
+
+#[test]
+fn diagnostics_are_prefixed_with_the_program_name() {
+    // Every line the indexer writes to stderr is "<program>: <message>". The
+    // prefix is assembled from a constant in a dozen places, so check the
+    // rendered text rather than trusting each format string.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join("a.txt"), "needle\n").unwrap();
+    fs::write(root.join("sub/b.txt"), "needle\n").unwrap();
+    fs::write(root.join("blob.bin"), b"abc\0def").unwrap(); // skipped, with --verbose
+    let index = dir.path().join("index");
+    // --git outside a repository adds the fallback note; the ceiling stops git
+    // finding some repository that happens to enclose the temp directory.
+    let out = sealed(CINDEX)
+        .env(INDEX_ENV, &index)
+        .env("GIT_CEILING_DIRECTORIES", dir.path())
+        .args([
+            "--verbose",
+            "--git",
+            root.to_str().unwrap(),
+            root.join("sub").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let err = text(&out.stderr);
+    let prefix = format!("{}: ", names::CINDEX);
+    for line in err.lines() {
+        assert!(
+            line.starts_with(&prefix),
+            "unprefixed line {line:?} in:\n{err}"
+        );
+    }
+    // Enough different messages went by that this is not vacuous.
+    for expected in [
+        "not indexing it twice",
+        "walking the directory instead",
+        "files found in",
+        "skipping",
+        "2 files indexed (1 skipped)",
+        "wrote ",
+    ] {
+        assert!(err.contains(expected), "no {expected:?} line in:\n{err}");
+    }
 }
 
 #[cfg(windows)]
@@ -302,13 +356,6 @@ fn unreadable_file_is_reported_without_verbose() {
     restore_readable(&secret);
 }
 
-fn have_git() -> bool {
-    Command::new("git")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
 /// A committed repository with one tracked file and one ignored file, both
 /// containing `needle`, so a search shows which file set was indexed.
 fn init_repo(root: &Path) -> bool {
@@ -317,50 +364,9 @@ fn init_repo(root: &Path) -> bool {
     fs::write(root.join(".gitignore"), "build/\n").unwrap();
     fs::write(root.join("src/a.rs"), "needle tracked\n").unwrap();
     fs::write(root.join("build/out.txt"), "needle ignored\n").unwrap();
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .output()
-            .is_ok_and(|o| o.status.success())
-    };
-    git(&["init", "-q"]) && git(&["add", "-A"]) && git(&["commit", "-q", "-m", "init"])
-}
-
-/// Run a binary from `cwd` with NO `CSEARCHINDEX` and a private home, so the
-/// only way it can find an index is the walk-up rule -- and the home fallback
-/// is a path known not to exist rather than whatever this machine has.
-///
-/// The private home also needs a git config: an empty home plus a work tree on
-/// a filesystem that records no ownership (exFAT, and CI temp dirs) makes git
-/// refuse the repo with "dubious ownership", which would make `--local` fall
-/// back to walking. `safe.directory = *` restores the behaviour git has in a
-/// normally configured environment -- it does not disable anything in the
-/// product, only in this synthetic home.
-fn run_from(exe: &str, cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    let gitconfig = home.join(".gitconfig");
-    if !gitconfig.exists() {
-        fs::write(&gitconfig, "[safe]\n\tdirectory = *\n").unwrap();
-    }
-    Command::new(exe)
-        .current_dir(cwd)
-        .env_remove("CSEARCHINDEX")
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("GIT_CONFIG_GLOBAL", &gitconfig)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args(args)
-        .output()
-        .expect("run")
+    common::git(root, &["init", "-q"])
+        && common::git(root, &["add", "-A"])
+        && common::git(root, &["commit", "-q", "-m", "init"])
 }
 
 #[test]
@@ -374,15 +380,14 @@ fn local_index_is_created_excluded_and_discovered() {
     assert!(init_repo(&root));
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
-    let (cindex_exe, csearch_exe) = (env!("CARGO_BIN_EXE_cindex"), env!("CARGO_BIN_EXE_csearch"));
 
     // From a subdirectory, --local finds the repo root and indexes it there.
-    let out = run_from(cindex_exe, &root.join("src"), &home, &["--local"]);
+    let out = run_from(CINDEX, &root.join("src"), &home, &["--local"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let err = text(&out.stderr);
     assert!(err.contains("local index at"), "{err}");
     assert!(
-        root.join(".csearchindex").is_file(),
+        root.join(INDEX_FILE_NAME).is_file(),
         "index not at the repo root"
     );
 
@@ -393,14 +398,17 @@ fn local_index_is_created_excluded_and_discovered() {
         .unwrap();
     assert_eq!(text(&status.stdout).trim(), "", "git sees the index");
     let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
-    assert!(exclude.lines().any(|l| l == ".csearchindex"), "{exclude}");
-    assert!(!fs::read_to_string(root.join(".gitignore"))
-        .unwrap()
-        .contains("csearchindex"));
+    assert!(exclude.lines().any(|l| l == INDEX_FILE_NAME), "{exclude}");
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore")).unwrap(),
+        "build/\n",
+        "the tracked .gitignore must not be touched"
+    );
 
-    // From anywhere inside the repo, csearch finds it with no configuration,
-    // and --local implied --git so the ignored file is not there.
-    let out = run_from(csearch_exe, &root.join("src"), &home, &["-l", "needle"]);
+    // From anywhere inside the repo, csearch-rs finds it with no
+    // configuration, and --local implied --git so the ignored file is not
+    // there.
+    let out = run_from(CSEARCH, &root.join("src"), &home, &["-l", "needle"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let listed = text(&out.stdout);
     assert!(listed.contains("a.rs"), "{listed}");
@@ -411,7 +419,7 @@ fn local_index_is_created_excluded_and_discovered() {
 
     // From outside the repo there is nothing to find -- the local index must
     // not leak into unrelated directories.
-    let out = run_from(csearch_exe, dir.path(), &home, &["needle"]);
+    let out = run_from(CSEARCH, dir.path(), &home, &["needle"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
     assert!(
         text(&out.stderr).contains("no index"),
@@ -420,16 +428,17 @@ fn local_index_is_created_excluded_and_discovered() {
     );
 
     // Running it again is idempotent: one exclude line, not two.
-    let out = run_from(cindex_exe, &root, &home, &["--local"]);
+    let out = run_from(CINDEX, &root, &home, &["--local"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
-    assert_eq!(exclude.lines().filter(|l| *l == ".csearchindex").count(), 1);
+    assert_eq!(exclude.lines().filter(|l| *l == INDEX_FILE_NAME).count(), 1);
 
-    // And plain `cindex` inside the repo now rebuilds the local one, not home.
-    let out = run_from(cindex_exe, &root.join("src"), &home, &[]);
+    // And plain `cindex-rs` inside the repo now rebuilds the local one, not
+    // home.
+    let out = run_from(CINDEX, &root.join("src"), &home, &[]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
-        !home.join(".csearchindex").exists(),
+        !home.join(INDEX_FILE_NAME).exists(),
         "wrote to the home index instead"
     );
 }
@@ -446,22 +455,9 @@ fn local_no_git_walks_the_directory() {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
 
-    let out = run_from(
-        env!("CARGO_BIN_EXE_cindex"),
-        &root,
-        &home,
-        &["--local", "--no-git"],
-    );
+    let out = run_from(CINDEX, &root, &home, &["--local", "--no-git"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    let listed = text(
-        &run_from(
-            env!("CARGO_BIN_EXE_csearch"),
-            &root,
-            &home,
-            &["-l", "needle"],
-        )
-        .stdout,
-    );
+    let listed = text(&run_from(CSEARCH, &root, &home, &["-l", "needle"]).stdout);
     assert!(
         listed.contains("out.txt"),
         "--no-git should have walked past .gitignore: {listed}"
@@ -477,15 +473,13 @@ fn explicit_indexpath_still_wins_over_a_local_index() {
     let home = dir.path().join("home");
     fs::create_dir_all(&home).unwrap();
     // A local index exists...
-    assert!(
-        run_from(env!("CARGO_BIN_EXE_cindex"), &root, &home, &["--local"])
-            .status
-            .success()
-    );
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
     // ...but --indexpath names a different, empty one, and that is what is used.
     let other = dir.path().join("other.index");
     let out = run_from(
-        env!("CARGO_BIN_EXE_csearch"),
+        CSEARCH,
         &root,
         &home,
         &["--indexpath", other.to_str().unwrap(), "needle"],
@@ -506,8 +500,8 @@ fn git_flag_falls_back_with_a_note_outside_a_repository() {
     let index = dir.path().join("index");
     // GIT_CEILING_DIRECTORIES stops git from discovering some repository that
     // happens to enclose the temp directory on this machine.
-    let out = Command::new(env!("CARGO_BIN_EXE_cindex"))
-        .env("CSEARCHINDEX", &index)
+    let out = sealed(CINDEX)
+        .env(INDEX_ENV, &index)
         .env("GIT_CEILING_DIRECTORIES", dir.path())
         .args(["--git", plain.to_str().unwrap()])
         .output()
@@ -530,23 +524,11 @@ fn git_flag_excludes_ignored_files_end_to_end() {
     fs::write(root.join(".gitignore"), "build/\n").unwrap();
     fs::write(root.join("a.rs"), "needle tracked\n").unwrap();
     fs::write(root.join("build/out.txt"), "needle ignored\n").unwrap();
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .output()
-            .is_ok_and(|o| o.status.success())
-    };
-    assert!(git(&["init", "-q"]) && git(&["add", "-A"]) && git(&["commit", "-q", "-m", "init"]));
+    assert!(
+        common::git(&root, &["init", "-q"])
+            && common::git(&root, &["add", "-A"])
+            && common::git(&root, &["commit", "-q", "-m", "init"])
+    );
 
     let index = dir.path().join("index");
     let out = cindex(&index, &["--git", root.to_str().unwrap()]);

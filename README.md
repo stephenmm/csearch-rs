@@ -9,10 +9,10 @@ of files that *could* contain a match, and greps only those.
 `grep -r` and `ripgrep` read every file every time. csearch-rs reads a few.
 
 ```console
-$ cindex /usr/include
-cindex: 4905 files indexed (5 skipped), 148595 trigrams, 7390023 posting entries, index 10517262 bytes
+$ cindex-rs /usr/include
+cindex-rs: 4905 files indexed (5 skipped), 148595 trigrams, 7390023 posting entries, index 10517262 bytes
 
-$ csearch -n 'pthread_mutex_t'
+$ csearch-rs -n 'pthread_mutex_t'
 /usr/include/pthread.h:781:extern int pthread_mutex_init (pthread_mutex_t *__mutex,
 /usr/include/pthread.h:786:extern int pthread_mutex_destroy (pthread_mutex_t *__mutex)
 /usr/include/pthread.h:790:extern int pthread_mutex_trylock (pthread_mutex_t *__mutex)
@@ -23,7 +23,7 @@ $ csearch -n 'pthread_mutex_t'
 had to be run against twelve files:
 
 ```console
-$ csearch --verbose 'pthread_mutex_t'
+$ csearch-rs --verbose 'pthread_mutex_t'
 query: _mu ad_ d_m ead ex_ hre mut pth rea tex thr ute x_t
 candidates: 12 of 4905 files (2.28ms)
 58 matches in 7 files (5.85ms)
@@ -49,55 +49,65 @@ on first launch. Right-click the binary and choose **Open** once (or run
 **From source** — Rust 1.75 or newer:
 
 ```
-cargo build --release      # target/release/{cindex,csearch}
+cargo build --release      # target/release/{cindex-rs,csearch-rs}
 ```
 
 Dependencies are caret ranges; `Cargo.lock` records a set verified to build on
 1.75, so use `cargo build --locked` if you want exactly that set.
 
+**Next to the original.** The two programs are `cindex-rs` and `csearch-rs`,
+the index is a file called `.csearch-rs-index`, and the one environment
+variable is `$CSEARCH_RS_INDEX`. None of those is a name
+[Google's codesearch](https://github.com/google/codesearch) uses, so both can
+be installed on one machine and neither will read, overwrite or delete the
+other's index — see [Compared with Google's codesearch](#compared-with-googles-codesearch).
+If this is the only one you have and you would rather type the short names,
+alias them. (Releases before 0.3 did use the original's names; see
+[Upgrading from 0.2](#upgrading-from-02).)
+
 ## Using it
 
-### Index a tree — `cindex`
+### Index a tree — `cindex-rs`
 
 ```
-cindex --local               # index this repository into .csearchindex at its root
-cindex ~/src                 # or: index a tree into the shared index (added to any existing roots)
-cindex                       # re-index whichever index applies here
-cindex --list                # show the indexed roots
-cindex --remove ~/src/old    # drop one root and rebuild
-cindex --reset               # delete the index
+cindex-rs --local               # index this repository into .csearch-rs-index at its root
+cindex-rs ~/src                 # or: index a tree into the shared index (added to any existing roots)
+cindex-rs                       # re-index whichever index applies here
+cindex-rs --list                # show the indexed roots
+cindex-rs --remove ~/src/old    # drop one root and rebuild
+cindex-rs --reset               # delete the index
 ```
 
-`cindex --local` is the simplest way to start: it finds the enclosing
-repository, indexes it into a `.csearchindex` file at the root (kept out of
+`cindex-rs --local` is the simplest way to start: it finds the enclosing
+repository, indexes it into a `.csearch-rs-index` file at the root (kept out of
 `git status` via `info/exclude`), and takes the file list from git so ignored
-files are never indexed. From then on `cindex` and `csearch` anywhere inside
-that repository use that index with no configuration.
+files are never indexed. From then on `cindex-rs` and `csearch-rs` anywhere
+inside that repository use that index with no configuration.
 
 Adding a path to the shared index indexes it *and* everything already there,
 so that index always covers every root you have added.
 
 ### Keeping the index fresh
 
-An index reflects the files as they were at the last `cindex`. To stop thinking
-about that in a git repository:
+An index reflects the files as they were at the last `cindex-rs`. To stop
+thinking about that in a git repository:
 
 ```
-cindex --install-hooks       # build the index now, and refresh it on every git event
+cindex-rs --install-hooks       # build the index now, and refresh it on every git event
 ```
 
 That builds the local index and installs `post-checkout`, `post-merge`,
 `post-commit` and `post-rewrite` hooks that each run
-`cindex --local --if-changed --background`. So after any checkout, pull, commit
-or rebase, the index is refreshed — `--if-changed` skips the work when nothing
-moved, and `--background` returns at once so git never waits on it. Foreign
-hooks already present are left untouched; `--uninstall-hooks` removes only the
-ones csearch-rs installed.
+`cindex-rs --local --if-changed --background`. So after any checkout, pull,
+commit or rebase, the index is refreshed — `--if-changed` skips the work when
+nothing moved, and `--background` returns at once so git never waits on it.
+Foreign hooks already present are left untouched; `--uninstall-hooks` removes
+only the ones csearch-rs installed.
 
 Between git events (an uncommitted edit you have not yet searched for), re-run
-`cindex --local` yourself. `csearch` prints a one-line note when a search runs
-against an index whose `HEAD` has moved, so a stale result set is never silently
-trusted.
+`cindex-rs --local` yourself. `csearch-rs` prints a one-line note when a search
+runs against an index whose `HEAD` has moved, so a stale result set is never
+silently trusted.
 
 | Flag | Meaning |
 |---|---|
@@ -113,14 +123,14 @@ trusted.
 | `--install-hooks` | install git hooks that refresh the local index on every git event (implies `--local`) |
 | `--uninstall-hooks` | remove those hooks |
 
-### Search — `csearch`
+### Search — `csearch-rs`
 
 ```
-csearch 'unsafe impl Send'             # plain search
-csearch -n 'fn main'                   # with line numbers
-csearch -l -f '\.rs$' 'TODO|FIXME'     # file names only, limited to .rs files
-csearch -i -c deprecated               # case-insensitive, count per file
-csearch --verbose 'foo.*bar'           # show the trigram query and timings
+csearch-rs 'unsafe impl Send'             # plain search
+csearch-rs -n 'fn main'                   # with line numbers
+csearch-rs -l -f '\.rs$' 'TODO|FIXME'     # file names only, limited to .rs files
+csearch-rs -i -c deprecated               # case-insensitive, count per file
+csearch-rs --verbose 'foo.*bar'           # show the trigram query and timings
 ```
 
 | Flag | Meaning |
@@ -140,15 +150,16 @@ Syntax is the [`regex` crate's](https://docs.rs/regex/latest/regex/#syntax) —
 Perl-like, but with no backtracking, so matching is linear-time and cannot blow
 up on a pathological pattern.
 
-Which index is used, in order: `--indexpath`; then `$CSEARCHINDEX`; then the
-nearest `.csearchindex` at or above the working directory (a project index
-from `cindex --local`); then `~/.csearchindex` (`%USERPROFILE%\.csearchindex`
-on Windows). `--verbose` prints the one chosen. Exit status follows grep:
-**0** matched, **1** nothing matched, **2** an error.
+Which index is used, in order: `--indexpath`; then `$CSEARCH_RS_INDEX`; then
+the nearest `.csearch-rs-index` at or above the working directory (a project
+index from `cindex-rs --local`); then `~/.csearch-rs-index`
+(`%USERPROFILE%\.csearch-rs-index` on Windows). `--verbose` prints the one
+chosen. Exit status follows grep: **0** matched, **1** nothing matched, **2**
+an error.
 
 ## Good to know
 
-- **Results reflect the last `cindex` run.** Files edited since then are
+- **Results reflect the last `cindex-rs` run.** Files edited since then are
   searched as they were indexed; deleted files are reported once on stderr.
 - **Not everything is indexed.** Skipped, as in the original: names beginning
   `.`, `#` or `~` or ending in `~`; files containing NUL; invalid UTF-8; lines
@@ -166,7 +177,7 @@ on Windows). `--verbose` prints the one chosen. Exit status follows grep:
   parallel grep. `--verbose` prints `query: +` when that happens.
 - **Output matches grep** where the two overlap: one match counted per line,
   CRLF-aware `^` and `$`, and no phantom line after a file's final newline.
-- **Results stream** in path order as they are found, so `csearch pattern | head`
+- **Results stream** in path order as they are found, so `csearch-rs pattern | head`
   produces output immediately and exits quietly when the reader goes away.
 - **The index is replaced atomically.** A search running during a rebuild keeps
   reading the old index; a failed rebuild leaves the previous one intact. A
@@ -174,10 +185,10 @@ on Windows). `--verbose` prints the one chosen. Exit status follows grep:
 
 ## How it works
 
-A *trigram* is three consecutive bytes. `cindex` records, for every trigram,
+A *trigram* is three consecutive bytes. `cindex-rs` records, for every trigram,
 the sorted list of files containing it.
 
-`csearch` compiles your regexp into a boolean query over trigrams — searching
+`csearch-rs` compiles your regexp into a boolean query over trigrams — searching
 for `pthread_mutex_t` requires `pth`, `thr`, `hre` … `x_t`, all of them — and
 intersects those posting lists to get a candidate set. Only the candidates are
 then matched with the real regexp. The saving is in what is never read: twelve
@@ -248,7 +259,7 @@ The table above is warm-cache — the kernel had already been read and 1.6 GB
 fits in this machine's RAM. That is the *worst* case for an index, because
 ripgrep's reads are nearly free. Cold, the picture changes completely:
 
-| pattern | ripgrep cold | csearch cold | cold | (warm) |
+| pattern | ripgrep cold | csearch-rs cold | cold | (warm) |
 |---|---|---|---|---|
 | `pthread_mutex_t` | 17,049 ms | 533 ms | **32.0x** | 13.0x |
 | `kmem_cache_alloc` | 13,119 ms | 574 ms | **22.8x** | 4.1x |
@@ -282,7 +293,7 @@ is already sitting in the page cache.
   candidates, and runs at 0.35x. Character classes and bare quantifiers give the
   index nothing to prune with, so you pay for it and grep most of the tree
   anyway. This is a real query shape, not a straw man.
-- **You have just edited files.** csearch-rs answers from the last `cindex` run;
+- **You have just edited files.** csearch-rs answers from the last `cindex-rs` run;
   ripgrep reads what is on disk now. That is a correctness difference rather
   than a speed one, and it is the strongest reason to keep ripgrep to hand.
 - **The tree is small, or you will search it once.** Below a few hundred MB both
@@ -296,8 +307,8 @@ One caveat when comparing results: the two do not search identical file sets.
 csearch-rs omits files it declined to index — very long lines, more than 20,000
 distinct trigrams, invalid UTF-8 — which ripgrep still reads. Invisible for a
 selective pattern; on `[a-z]+` over the whole kernel it is a 0.2% difference in
-match count. In the other direction, a plain `cindex` indexes files ripgrep
-would skip via `.gitignore`; `cindex --git` closes that gap.
+match count. In the other direction, a plain `cindex-rs` indexes files ripgrep
+would skip via `.gitignore`; `cindex-rs --git` closes that gap.
 
 ## Compared with Google's codesearch
 
@@ -319,6 +330,30 @@ The trade-off: the Go version merges postings on disk and can index
 incrementally, so its memory use is bounded by the merge rather than the
 corpus. This one holds postings in memory until the index is written, and
 rebuilds every root each time.
+
+### Installed side by side
+
+The two share no name anywhere, so both can live on one machine — on the same
+`PATH` and in the same home directory:
+
+| | Go original | csearch-rs |
+|---|---|---|
+| Indexer | `cindex` | `cindex-rs` |
+| Search | `csearch` | `csearch-rs` |
+| Index file | `~/.csearchindex` | `~/.csearch-rs-index`, or one per project |
+| Variable | `$CSEARCHINDEX` | `$CSEARCH_RS_INDEX` |
+
+They have to be separate files: the two index formats are unrelated, and each
+tool would report the other's index as corrupt. csearch-rs never reads
+`$CSEARCHINDEX` and never opens, writes or deletes a `.csearchindex`.
+`tests/coexist.rs` runs both in one home directory and checks that every
+build, refresh and reset by either leaves the other's index byte-for-byte
+alone.
+
+Worth knowing if you run both on Windows: the original cannot replace an index
+it has mapped, so there a bare `cindex` reports "done" and leaves the old index
+untouched, with `.csearchindex~` files beside it (v1.2.0). `cindex -reset
+<path>` is the way to refresh it on that platform.
 
 **Results are identical.** `compare_csearch.py` indexes a corpus with both
 implementations and checks that the per-file match counts agree exactly:
@@ -398,14 +433,42 @@ codes, deleted and unreadable files).
 design rests on: **every file a regexp matches must be among the candidates the
 index returns.** A false negative there would be invisible in normal use — the
 file simply never appears. 8,000 checks over random corpora and patterns have
-produced none. `CSEARCH_PROP_ITERS=40 cargo test --test superset` runs it hard.
+produced none. `CSEARCH_RS_PROP_ITERS=40 cargo test --test superset` runs it
+hard.
 
-Beyond the suite: 11/11 parity with the Go original on two corpora, `csearch -c`
-matching `grep -Ec` per file on every pattern tried, and identical results from
-the Linux and Windows builds. CI runs the suite, `rustfmt` and
-`clippy -D warnings` on Linux, Windows and macOS (Apple Silicon and Intel) for
-every push, and a pull request cannot merge unless `Cargo.toml`'s version has
-moved.
+`tests/coexist.rs` and `tests/names.rs` hold the project to not sharing a name
+with the original: the binaries, index file and variable are checked against
+upstream's, and the two tools are run side by side in one home directory. That
+last test uses Google's real `cindex` and `csearch` — CI installs them on every
+platform and fails if they are missing; elsewhere it skips with a message when
+they are not installed.
+
+Beyond the suite: 11/11 parity with the Go original on two corpora,
+`csearch-rs -c` matching `grep -Ec` per file on every pattern tried, and
+identical results from the Linux and Windows builds. CI runs the suite,
+`rustfmt` and `clippy -D warnings` on Linux, Windows and macOS (Apple Silicon
+and Intel) for every push, and a pull request cannot merge unless
+`Cargo.toml`'s version has moved.
+
+## Upgrading from 0.2
+
+0.3 renamed everything that used to share a name with the original codesearch,
+so that the two can be installed together:
+
+| 0.2 | 0.3 |
+|---|---|
+| `cindex`, `csearch` | `cindex-rs`, `csearch-rs` |
+| `.csearchindex` (and its `.meta`) | `.csearch-rs-index` (and its `.meta`) |
+| `$CSEARCHINDEX` | `$CSEARCH_RS_INDEX` |
+
+Nothing is migrated, because an index is only a cache: run `cindex-rs --local`
+(or `cindex-rs <dir>`) again and delete the old files. Until you do, both
+programs point out an old index when they come across one — recognised by its
+contents, so an index that belongs to the original csearch is never mistaken
+for a leftover, and never touched. `cindex-rs --install-hooks` rewrites hooks
+installed by 0.2, which would otherwise go on calling the old binary. The old
+`cindex` and `csearch` binaries are yours to remove; `setup_csearch.py` reports
+them and leaves them alone.
 
 ## Contributing
 

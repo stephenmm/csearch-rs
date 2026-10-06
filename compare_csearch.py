@@ -1,4 +1,5 @@
-"""Compare Google's Go codesearch (cindex/csearch) against csearch-rs.
+"""Compare Google's Go codesearch (cindex/csearch) against csearch-rs
+(cindex-rs/csearch-rs).
 
 Run:  py compare_csearch.py --corpus /path/to/some/code
 
@@ -9,8 +10,8 @@ What it does, fully automated:
      v1.2.0); if `go` itself is missing on Windows, installs it with winget.
   3. Indexes the corpus with each implementation into separate temp index
      files (warm-up + timed runs), records index size and wall time.
-  4. Runs every pattern with `csearch -c` on both, times them, and checks that
-     the per-file match counts are IDENTICAL.
+  4. Runs every pattern with `-c` on both, times them, and checks that the
+     per-file match counts are IDENTICAL.
   5. Prints a table, writes compare_results.md next to this script, prints
      PASS/FAIL lines and exits 1 if any parity check failed.
 
@@ -36,6 +37,15 @@ EXE = ".exe" if os.name == "nt" else ""
 SCRIPT_DIR = Path(__file__).resolve().parent
 GO_MODULE = "github.com/google/codesearch"
 
+# Each implementation reads its index location from a variable of its own, so
+# they can be pointed at different files in one environment.
+GO_INDEX_ENV = "CSEARCHINDEX"
+RUST_INDEX_ENV = "CSEARCH_RS_INDEX"
+
+# The first line the original's `cindex -help` prints. A csearch-rs build from
+# before the rename was also called cindex, so the name alone proves nothing.
+ORIGINAL_USAGE = "usage: cindex [-list] [-reset] [path...]"
+
 DEFAULT_PATTERNS: list[tuple[str, bool]] = [
     ("fn main", False),
     ("unsafe impl Send", False),
@@ -57,6 +67,7 @@ class Impl:
     cindex: Path
     csearch: Path
     index_path: Path
+    index_env: str
     index_secs: list[float] = field(default_factory=list)
     index_bytes: int = 0
 
@@ -95,7 +106,7 @@ def timed(cmd: list[str], env: dict[str, str]) -> tuple[float, int, str, str]:
 
 def find_rust(rust_dir: Path, results: list[str], no_build: bool) -> tuple[Path, Path] | None:
     rel = rust_dir / "target" / "release"
-    cindex, csearch = rel / f"cindex{EXE}", rel / f"csearch{EXE}"
+    cindex, csearch = rel / f"cindex-rs{EXE}", rel / f"csearch-rs{EXE}"
     if cindex.exists() and csearch.exists():
         results.append(f"PASS: rust binaries at {rel}")
         return cindex, csearch
@@ -127,13 +138,21 @@ def go_bin_dir() -> Path | None:
     return None
 
 
+def is_the_original(cindex: Path) -> bool:
+    """True if this `cindex` is Google's, judged by what it prints for -help."""
+    _, out, err = run([str(cindex), "-help"])
+    lines = (out + err).splitlines()
+    return bool(lines) and lines[0].strip() == ORIGINAL_USAGE
+
+
 def find_go(go_bin: Path | None, results: list[str], no_build: bool) -> tuple[Path, Path] | None:
     dirs = [d for d in (go_bin, go_bin_dir(), Path.home() / "go" / "bin") if d is not None]
     cindex, csearch = which_any("cindex", dirs), which_any("csearch", dirs)
-    # Guard against picking up the Rust binaries as "Go" ones.
-    if cindex and csearch and "csearch-rs" not in str(cindex):
-        results.append(f"PASS: go binaries at {cindex.parent}")
-        return cindex, csearch
+    if cindex and csearch:
+        if is_the_original(cindex):
+            results.append(f"PASS: go binaries at {cindex.parent}")
+            return cindex, csearch
+        print(f"  {cindex} is not the original codesearch (a csearch-rs build from before the rename?)")
     if no_build:
         results.append("FAIL: go codesearch binaries not found and --no-build given")
         return None
@@ -160,7 +179,7 @@ def find_go(go_bin: Path | None, results: list[str], no_build: bool) -> tuple[Pa
             break
     dirs = [d for d in (go_bin_dir(), Path.home() / "go" / "bin") if d is not None]
     cindex, csearch = which_any("cindex", dirs), which_any("csearch", dirs)
-    if cindex and csearch:
+    if cindex and csearch and is_the_original(cindex):
         results.append(f"FIXED: installed go codesearch to {cindex.parent}")
         return cindex, csearch
     results.append("FAIL: go install of codesearch did not produce binaries")
@@ -170,8 +189,15 @@ def find_go(go_bin: Path | None, results: list[str], no_build: bool) -> tuple[Pa
 # ---------------------------------------------------------------- measuring
 
 
+def tool_env(impl: Impl) -> dict[str, str]:
+    """This implementation's index variable, and never the other one's."""
+    env = {k: v for k, v in os.environ.items() if k not in (GO_INDEX_ENV, RUST_INDEX_ENV)}
+    env[impl.index_env] = str(impl.index_path)
+    return env
+
+
 def index_corpus(impl: Impl, corpus: Path, runs: int, results: list[str]) -> bool:
-    env = dict(os.environ, CSEARCHINDEX=str(impl.index_path))
+    env = tool_env(impl)
     for i in range(runs + 1):  # first run is warm-up
         if impl.index_path.exists():
             impl.index_path.unlink()
@@ -201,7 +227,7 @@ def parse_counts(out: str, corpus: Path) -> dict[str, int]:
 
 
 def search(impl: Impl, pattern: str, icase: bool, corpus: Path, runs: int) -> SearchResult:
-    env = dict(os.environ, CSEARCHINDEX=str(impl.index_path))
+    env = tool_env(impl)
     cmd = [str(impl.csearch), "-c"] + (["-i"] if icase else []) + [pattern]
     secs: list[float] = []
     counts: dict[str, int] = {}
@@ -282,8 +308,8 @@ def main() -> int:
 
     tmp = Path(tempfile.mkdtemp(prefix="csearch-compare-"))
     impls = [
-        Impl("go", go[0], go[1], tmp / "go.index"),
-        Impl("rust", rust[0], rust[1], tmp / "rust.index"),
+        Impl("go", go[0], go[1], tmp / "go.index", GO_INDEX_ENV),
+        Impl("rust", rust[0], rust[1], tmp / "rust.index", RUST_INDEX_ENV),
     ]
     print(f"corpus: {corpus}")
     for impl in impls:

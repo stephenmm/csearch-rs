@@ -2,13 +2,20 @@
 
 Run:  py setup_csearch.py
 Steps: locate cargo (offers winget install of rustup if missing) -> cargo build
---release -> cargo test --release -> copy cindex/csearch into %USERPROFILE%\\bin
--> verify the binaries run. Prints PASS/FIXED/FAIL lines; exit code 1 on failure.
+--release -> cargo test --release -> copy cindex-rs/csearch-rs into
+%USERPROFILE%\\bin -> verify the binaries run. Prints PASS/FIXED/FAIL lines;
+exit code 1 on failure.
+
+The binaries are deliberately not called cindex and csearch: those names
+belong to the original codesearch, which this installs alongside. A build from
+before the rename that is still sitting in the bin directory under the old
+names is reported (NOTE), never deleted.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +23,9 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent
 EXE = ".exe" if os.name == "nt" else ""
-BINARIES = ("cindex", "csearch")
+BINARIES = ("cindex-rs", "csearch-rs")
+# What csearch-rs 0.2 and earlier installed -- and what the original is called.
+OLD_NAMES = ("cindex", "csearch")
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> tuple[int, str]:
@@ -48,6 +57,19 @@ def ensure_cargo(results: list[str]) -> str | None:
         return None
     results.append("FAIL: cargo not found; install Rust from https://rustup.rs and re-run")
     return None
+
+
+def is_pre_rename_build(exe: Path, old_name: str) -> bool:
+    """True if `exe` is a csearch-rs binary from before the rename.
+
+    Such a build answers `--version` with "<old name> <semver>". The original
+    codesearch has no --version flag at all, so it can never match.
+    """
+    try:
+        code, out = run([str(exe), "--version"])
+    except OSError:
+        return False
+    return code == 0 and re.fullmatch(rf"{re.escape(old_name)} \d+\.\d+\.\d+\S*", out.strip()) is not None
 
 
 def main() -> int:
@@ -87,6 +109,14 @@ def main() -> int:
             results.append(f"PASS: installed {dst} ({out.strip()})")
         else:
             results.append(f"FAIL: {dst} --version rc={code}: {out[-300:]}")
+
+    for old_name in OLD_NAMES:
+        old = bin_dir / f"{old_name}{EXE}"
+        if old.exists() and is_pre_rename_build(old, old_name):
+            results.append(
+                f"NOTE: {old} is a csearch-rs build from before the rename. It is not updated "
+                f"any more, and it shadows the original codesearch's `{old_name}` -- delete it."
+            )
 
     on_path = any(Path(p).resolve() == bin_dir.resolve() for p in os.environ.get("PATH", "").split(os.pathsep) if p)
     if on_path:

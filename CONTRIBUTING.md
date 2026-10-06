@@ -8,7 +8,7 @@ spare time, so please open an issue before starting anything large.
 Rust 1.75 or newer, and on Windows the MSVC toolchain (for the linker).
 
 ```
-cargo build --release        # binaries in target/release/{cindex,csearch}
+cargo build --release        # binaries in target/release/{cindex-rs,csearch-rs}
 cargo test                   # the full suite
 ```
 
@@ -43,15 +43,22 @@ platform-specific, expect the other platform to have an opinion.
 - `src/**` unit tests cover the AVX2 trigram kernel against the scalar path,
   the bitmap dedup against a naive set, varints, the regexp analyser against
   Russ Cox's original test vectors, and the grep loop.
-- `tests/cli.rs` drives the real `cindex` and `csearch` binaries. Most bugs
-  this project has had lived in how the pieces are wired together, not in the
-  pieces, so end-to-end coverage matters here.
+- `tests/cli.rs` drives the real `cindex-rs` and `csearch-rs` binaries. Most
+  bugs this project has had lived in how the pieces are wired together, not in
+  the pieces, so end-to-end coverage matters here.
+- `tests/names.rs` and `tests/coexist.rs` check that nothing the project
+  installs shares a name with the original codesearch, and run the two side by
+  side. One test there needs Google's real `cindex` and `csearch`: it skips
+  with a message if they are not installed (`go install
+  github.com/google/codesearch/cmd/{cindex,csearch}@v1.2.0` provides them), and
+  CI sets `CSEARCH_RS_REQUIRE_ORIGINAL=1` so that there a missing original is
+  a failure, not a skip.
 - `tests/corruption.rs` damages every field of an index in turn. A malformed
   index must produce an error, never a panic.
 - `tests/superset.rs` is a randomised property test of the guarantee the whole
   design rests on: **every file a regexp matches must be among the candidates
   the index returns.** It runs 8 corpora by default;
-  `CSEARCH_PROP_ITERS=40 cargo test --test superset` runs more. A failure
+  `CSEARCH_RS_PROP_ITERS=40 cargo test --test superset` runs more. A failure
   prints the seed, pattern and file needed to reproduce it.
 
 If you change the query analysis or the index format, run the property test
@@ -77,13 +84,20 @@ project has. Pass `--go-bin DIR` if you already have Google's `cindex` and
 
 ## Compatibility
 
+- **Names.** csearch-rs installs next to the original codesearch, so nothing
+  it puts on a machine may share a name with it: not a binary, not the index
+  file, not an environment variable. `cindex`, `csearch`, `cgrep`,
+  `.csearchindex` and `$CSEARCHINDEX` are the original's and are never read,
+  written or honoured here. Ours live in `src/names.rs` and nowhere else in
+  the source — use the constants, including in messages, so that a hint like
+  "run `cindex-rs --reset`" can never name the other tool.
 - **Index format.** The on-disk format is versioned by the magic string in
   `src/write.rs`. If you change the layout, change the magic too; readers
   report an old index clearly instead of misparsing it.
 - **MSRV.** 1.75, declared as `rust-version` in `Cargo.toml`. Please do not
   raise it casually.
-- **Output.** `csearch` aims to match `grep` where the two overlap: one match
-  counted per line, exit 0/1/2, no phantom line after a trailing newline.
+- **Output.** `csearch-rs` aims to match `grep` where the two overlap: one
+  match counted per line, exit 0/1/2, no phantom line after a trailing newline.
   Divergence from grep is a bug unless there is a stated reason.
 
 ## Style

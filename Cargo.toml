@@ -1,6 +1,6 @@
 [package]
 name = "csearch-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Rust port of Google Code Search (cindex/csearch) with SIMD trigram extraction and parallel indexing/search"
@@ -10,12 +10,15 @@ license = "BSD-3-Clause"
 name = "csearch"
 path = "src/lib.rs"
 
+# The binaries are not called `cindex` and `csearch`: those names, like
+# `$CSEARCHINDEX` and `~/.csearchindex`, belong to the original, which this is
+# meant to be installable next to. See src/names.rs.
 [[bin]]
-name = "cindex"
+name = "cindex-rs"
 path = "src/bin/cindex.rs"
 
 [[bin]]
-name = "csearch"
+name = "csearch-rs"
 path = "src/bin/csearch.rs"
 
 [dependencies]

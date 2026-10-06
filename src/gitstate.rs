@@ -1,12 +1,13 @@
-//! Git-state stamping, so `cindex` can skip a rebuild when nothing has changed
-//! and `csearch` can warn when the index is behind the working tree.
+//! Git-state stamping, so `cindex-rs` can skip a rebuild when nothing has
+//! changed and `csearch-rs` can warn when the index is behind the working tree.
 //!
 //! Everything here is best-effort. Any git failure means "state unknown",
-//! which callers treat conservatively: `cindex --if-changed` rebuilds, and
-//! `csearch` simply stays quiet. The stamp is a sidecar next to the index
+//! which callers treat conservatively: `cindex-rs --if-changed` rebuilds, and
+//! `csearch-rs` simply stays quiet. The stamp is a sidecar next to the index
 //! (`<index>.meta`); losing or mangling it only ever costs one extra rebuild,
 //! so it needs no format versioning beyond a header line.
 
+use crate::names::{CINDEX, CSEARCH};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -148,9 +149,11 @@ pub fn staleness(index: &Path) -> Option<String> {
         .count();
     match behind {
         0 => None,
-        1 => Some("csearch: the index is behind HEAD in 1 root -- run cindex to refresh".into()),
+        1 => Some(format!(
+            "{CSEARCH}: the index is behind HEAD in 1 root -- run {CINDEX} to refresh"
+        )),
         n => Some(format!(
-            "csearch: the index is behind HEAD in {n} roots -- run cindex to refresh"
+            "{CSEARCH}: the index is behind HEAD in {n} roots -- run {CINDEX} to refresh"
         )),
     }
 }

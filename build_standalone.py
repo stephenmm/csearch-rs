@@ -32,7 +32,7 @@ from pathlib import Path
 
 PROJECT: Path = Path(__file__).resolve().parent
 DIST: Path = PROJECT / "dist"
-BINARIES: tuple[str, ...] = ("cindex", "csearch")
+BINARIES: tuple[str, ...] = ("cindex-rs", "csearch-rs")
 
 WIN_TARGET = "x86_64-pc-windows-msvc"
 LINUX_TARGET = "x86_64-unknown-linux-musl"
@@ -81,9 +81,9 @@ def find_vcvars() -> Path | None:
 
     vswhere ships with every VS 2017+ installer at a fixed path and reports
     installations anywhere on disk, including non-default drives, so it is
-    tried first. $CSEARCH_VCVARS overrides everything.
+    tried first. $CSEARCH_RS_VCVARS overrides everything.
     """
-    override = os.environ.get("CSEARCH_VCVARS")
+    override = os.environ.get("CSEARCH_RS_VCVARS")
     if override and Path(override).exists():
         return Path(override)
 
@@ -140,7 +140,7 @@ def build_windows(steps: list[Step]) -> None:
     vcvars = find_vcvars()
     if vcvars is None:
         steps.append(Step(False, "windows: no vcvars64.bat found -- install the MSVC build tools, "
-                                 "or point $CSEARCH_VCVARS at vcvars64.bat"))
+                                 "or point $CSEARCH_RS_VCVARS at vcvars64.bat"))
         return
     steps.append(Step(True, f"windows: using {vcvars}"))
 

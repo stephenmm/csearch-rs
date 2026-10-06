@@ -15,14 +15,15 @@ The latest release only. There are no maintenance branches.
 
 ## What this software does with untrusted input
 
-`cindex` and `csearch` are local command-line tools with no network access and
-no privileged operations, so the interesting inputs are the files they read:
+`cindex-rs` and `csearch-rs` are local command-line tools with no network
+access and no privileged operations, so the interesting inputs are the files
+they read:
 
 - **Files being indexed or searched.** Contents are treated as bytes. Files
   containing NUL, invalid UTF-8, lines over 2000 bytes, more than 20,000
   distinct trigrams, or larger than 1 GiB are skipped. File contents are never
   interpreted as anything but data.
-- **The index file.** `csearch` memory-maps it. Every section offset, name
+- **The index file.** `csearch-rs` memory-maps it. Every section offset, name
   index entry and posting index entry is validated when the index is opened,
   and a damaged file is reported as corrupt rather than trusted. This matters
   because an index is a file like any other and may not have been written by
@@ -43,6 +44,6 @@ rather than writing in place.
 
 ## Out of scope
 
-Indexing a directory means reading every file in it. Pointing `cindex` at
+Indexing a directory means reading every file in it. Pointing `cindex-rs` at
 somewhere you do not trust, or at secrets you do not want in an index file, is
 a decision for the person running it, not a vulnerability in the tool.

@@ -2,61 +2,16 @@
 //! warning, `--background`, and the git hooks. These drive the real binaries;
 //! they need `git` on PATH and skip with a message if it is missing.
 
+mod common;
+
+use common::{git, have_git, run_from, text, CINDEX, CSEARCH};
+use csearch::names::INDEX_FILE_NAME;
 use std::fs;
-use std::path::Path;
-use std::process::{Command, Output};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-fn have_git() -> bool {
-    Command::new("git")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
-}
-
-/// Run a binary from `cwd` with a private, git-usable home and no inherited
-/// index configuration -- so index resolution is only the walk-up rule and git
-/// is not tripped by the empty home on an ownership-less filesystem.
-fn run(exe: &str, cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    let gitconfig = home.join(".gitconfig");
-    if !gitconfig.exists() {
-        fs::write(&gitconfig, "[safe]\n\tdirectory = *\n").unwrap();
-    }
-    Command::new(exe)
-        .current_dir(cwd)
-        .env_remove("CSEARCHINDEX")
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("GIT_CONFIG_GLOBAL", &gitconfig)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args(args)
-        .output()
-        .expect("run")
-}
-
-fn git(root: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
 /// A committed one-file repo, plus a prepared private home.
-fn scene() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+fn scene() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -69,8 +24,22 @@ fn scene() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     (dir, root, home)
 }
 
-const CINDEX: &str = env!("CARGO_BIN_EXE_cindex");
-const CSEARCH: &str = env!("CARGO_BIN_EXE_csearch");
+/// The `exec` line of a hook script: the program it runs, and its arguments.
+fn hook_command(hook: &Path) -> (String, Vec<String>) {
+    let body = fs::read_to_string(hook).unwrap_or_else(|_| panic!("missing {}", hook.display()));
+    let line = body
+        .lines()
+        .find_map(|l| l.strip_prefix("exec "))
+        .unwrap_or_else(|| panic!("no exec line in {}: {body}", hook.display()));
+    // exec "<program>" <args...> -- the program is quoted because paths have
+    // spaces; the arguments are plain flags.
+    let rest = line.strip_prefix('"').expect("quoted program");
+    let (program, args) = rest.split_once('"').expect("closing quote");
+    (
+        program.to_string(),
+        args.split_whitespace().map(str::to_string).collect(),
+    )
+}
 
 #[test]
 fn if_changed_skips_until_a_commit_then_rebuilds() {
@@ -79,10 +48,12 @@ fn if_changed_skips_until_a_commit_then_rebuilds() {
         return;
     }
     let (_dir, root, home) = scene();
-    assert!(run(CINDEX, &root, &home, &["--local"]).status.success());
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
 
     // Nothing changed: --if-changed does no work and says so.
-    let out = run(
+    let out = run_from(
         CINDEX,
         &root,
         &home,
@@ -101,7 +72,7 @@ fn if_changed_skips_until_a_commit_then_rebuilds() {
     assert!(git(&root, &["add", "-A"]));
     assert!(git(&root, &["commit", "-q", "-m", "two"]));
 
-    let out = run(
+    let out = run_from(
         CINDEX,
         &root,
         &home,
@@ -113,7 +84,7 @@ fn if_changed_skips_until_a_commit_then_rebuilds() {
         "should have rebuilt: {}",
         text(&out.stderr)
     );
-    let found = run(CSEARCH, &root, &home, &["-l", "beta"]);
+    let found = run_from(CSEARCH, &root, &home, &["-l", "beta"]);
     assert!(
         found.status.success() && text(&found.stdout).contains("b.rs"),
         "{}",
@@ -128,11 +99,13 @@ fn if_changed_rebuilds_after_an_uncommitted_edit() {
         return;
     }
     let (_dir, root, home) = scene();
-    assert!(run(CINDEX, &root, &home, &["--local"]).status.success());
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
     // Edit without committing: HEAD is unchanged but the working tree is dirty,
     // and the dirty fingerprint must still force a rebuild.
     fs::write(root.join("a.rs"), "fn alpha() {}\nfn gamma() {}\n").unwrap();
-    let out = run(
+    let out = run_from(
         CINDEX,
         &root,
         &home,
@@ -143,7 +116,7 @@ fn if_changed_rebuilds_after_an_uncommitted_edit() {
         "dirty tree must rebuild: {}",
         text(&out.stderr)
     );
-    let found = run(CSEARCH, &root, &home, &["-l", "gamma"]);
+    let found = run_from(CSEARCH, &root, &home, &["-l", "gamma"]);
     assert!(
         text(&found.stdout).contains("a.rs"),
         "{}",
@@ -158,10 +131,12 @@ fn search_warns_when_the_index_is_behind_head() {
         return;
     }
     let (_dir, root, home) = scene();
-    assert!(run(CINDEX, &root, &home, &["--local"]).status.success());
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
 
     // Fresh index: no warning.
-    let out = run(CSEARCH, &root, &home, &["alpha"]);
+    let out = run_from(CSEARCH, &root, &home, &["alpha"]);
     assert!(
         !text(&out.stderr).contains("behind HEAD"),
         "{}",
@@ -172,7 +147,7 @@ fn search_warns_when_the_index_is_behind_head() {
     fs::write(root.join("b.rs"), "fn beta() {}\n").unwrap();
     assert!(git(&root, &["add", "-A"]));
     assert!(git(&root, &["commit", "-q", "-m", "two"]));
-    let out = run(CSEARCH, &root, &home, &["alpha"]);
+    let out = run_from(CSEARCH, &root, &home, &["alpha"]);
     assert!(
         text(&out.stderr).contains("behind HEAD"),
         "expected a staleness note: {}",
@@ -189,7 +164,7 @@ fn install_hooks_writes_four_hooks_and_the_initial_index() {
         return;
     }
     let (_dir, root, home) = scene();
-    let out = run(CINDEX, &root, &home, &["--install-hooks"]);
+    let out = run_from(CINDEX, &root, &home, &["--install-hooks"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
 
     let hooks = root.join(".git").join("hooks");
@@ -197,19 +172,77 @@ fn install_hooks_writes_four_hooks_and_the_initial_index() {
         let body =
             fs::read_to_string(hooks.join(name)).unwrap_or_else(|_| panic!("missing {name}"));
         assert!(body.contains("csearch-rs"), "{name}: no marker");
-        assert!(
-            body.contains("--if-changed") && body.contains("--background"),
+        // The hook must run the indexer that installed it -- by its own name,
+        // not the original csearch's `cindex`, which would be a different
+        // program entirely on a machine with both.
+        let (program, args) = hook_command(&hooks.join(name));
+        assert_eq!(
+            Path::new(&program).file_stem().unwrap().to_str().unwrap(),
+            csearch::names::CINDEX,
+            "{name}: runs {program}"
+        );
+        assert_eq!(
+            args,
+            ["--local", "--if-changed", "--background"],
             "{name}: wrong command"
         );
     }
     // install-hooks implies --local, so the index exists and is searchable now.
-    assert!(root.join(".csearchindex").is_file());
-    let found = run(CSEARCH, &root, &home, &["-l", "alpha"]);
+    assert!(root.join(INDEX_FILE_NAME).is_file());
+    let found = run_from(CSEARCH, &root, &home, &["-l", "alpha"]);
     assert!(
         text(&found.stdout).contains("a.rs"),
         "{}",
         text(&found.stdout)
     );
+}
+
+#[test]
+fn install_hooks_takes_over_hooks_left_by_the_pre_rename_binary() {
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let (_dir, root, home) = scene();
+    let hooks = root.join(".git").join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    // Exactly what csearch-rs 0.2 wrote: the marker, and an absolute path to
+    // a binary called `cindex`. Left alone, this hook would go on running the
+    // old binary -- or, once that is deleted, whatever else is named cindex.
+    let old = "#!/bin/sh\n\
+               # csearch-rs hook: keep the trigram index fresh (safe to delete)\n\
+               exec \"/old/place/cindex\" --local --if-changed --background\n";
+    for name in ["post-checkout", "post-merge"] {
+        fs::write(hooks.join(name), old).unwrap();
+    }
+
+    let out = run_from(CINDEX, &root, &home, &["--install-hooks"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("leaving it alone"),
+        "a pre-rename hook is ours and must be refreshed: {}",
+        text(&out.stderr)
+    );
+    for name in ["post-checkout", "post-merge", "post-commit", "post-rewrite"] {
+        let (program, _) = hook_command(&hooks.join(name));
+        assert_ne!(
+            program, "/old/place/cindex",
+            "{name} still runs the old binary"
+        );
+        assert_eq!(
+            Path::new(&program).file_stem().unwrap().to_str().unwrap(),
+            csearch::names::CINDEX,
+            "{name}: runs {program}"
+        );
+    }
+
+    // And --uninstall-hooks removes a pre-rename hook like any other.
+    fs::write(hooks.join("post-merge"), old).unwrap();
+    let out = run_from(CINDEX, &root, &home, &["--uninstall-hooks"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    for name in ["post-checkout", "post-merge", "post-commit", "post-rewrite"] {
+        assert!(!hooks.join(name).exists(), "{name} survived uninstall");
+    }
 }
 
 #[test]
@@ -224,7 +257,7 @@ fn hooks_leave_foreign_hooks_alone_and_uninstall_only_ours() {
     let foreign = hooks.join("post-commit");
     fs::write(&foreign, "#!/bin/sh\necho not ours\n").unwrap();
 
-    let out = run(CINDEX, &root, &home, &["--install-hooks"]);
+    let out = run_from(CINDEX, &root, &home, &["--install-hooks"]);
     assert!(out.status.success());
     assert!(
         text(&out.stderr).contains("leaving it alone"),
@@ -240,7 +273,7 @@ fn hooks_leave_foreign_hooks_alone_and_uninstall_only_ours() {
         "our hooks should still be written"
     );
 
-    let out = run(CINDEX, &root, &home, &["--uninstall-hooks"]);
+    let out = run_from(CINDEX, &root, &home, &["--uninstall-hooks"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
         !hooks.join("post-checkout").exists(),
@@ -256,10 +289,10 @@ fn background_returns_at_once_and_the_index_appears() {
         return;
     }
     let (_dir, root, home) = scene();
-    let index = root.join(".csearchindex");
+    let index = root.join(INDEX_FILE_NAME);
 
     let started = Instant::now();
-    let out = run(CINDEX, &root, &home, &["--local", "--background"]);
+    let out = run_from(CINDEX, &root, &home, &["--local", "--background"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
         started.elapsed() < Duration::from_secs(5),
@@ -271,7 +304,7 @@ fn background_returns_at_once_and_the_index_appears() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if index.is_file() {
-            let found = run(CSEARCH, &root, &home, &["-l", "alpha"]);
+            let found = run_from(CSEARCH, &root, &home, &["-l", "alpha"]);
             if found.status.success() && text(&found.stdout).contains("a.rs") {
                 break;
             }
