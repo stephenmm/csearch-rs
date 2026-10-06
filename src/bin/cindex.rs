@@ -24,8 +24,8 @@ use csearch::listing::{self, snapshot, ListOptions, Root, Source};
 use csearch::lock::{self, Turn};
 use csearch::names::CINDEX;
 use csearch::paths::{
-    canonical_string, default_index_path, find_repo_root, legacy_index_beside, sidecar,
-    with_upgrade_notes, INDEX_FILE_NAME,
+    canonical_string, default_index_path, find_repo_root, is_other_format_version,
+    legacy_index_beside, sidecar, with_upgrade_notes, INDEX_FILE_NAME,
 };
 use csearch::read::Index;
 use csearch::stamp::{self, Verdict};
@@ -592,7 +592,22 @@ enum Attended {
 
 /// Bring the index at `index_path` up to date. The caller holds its lock.
 fn refresh(args: &Args, index_path: &Path, local: Option<&Path>, attended: Attended) -> Result<()> {
-    let stored = if index_path.exists() {
+    // An index is a cache, and one written in another version's format
+    // cannot be read for its roots. With --local it does not have to be: the
+    // root is known, so the index is simply built again. That is what git's
+    // hooks run, and it is what makes an upgrade take care of itself instead
+    // of failing behind the user's back until somebody runs --reset. Without
+    // --local the roots are in the file that cannot be read, and the error
+    // stands. Nothing else that fails to open is replaced: a file that does
+    // not start with this project's magic may not be ours.
+    let replacing = local.is_some() && is_other_format_version(index_path);
+    let stored = if replacing {
+        eprintln!(
+            "{CINDEX}: {} was written by another version of {CINDEX}; building it again",
+            index_path.display()
+        );
+        Vec::new()
+    } else if index_path.exists() {
         stored_roots(index_path)?
     } else {
         Vec::new()
@@ -635,7 +650,7 @@ fn refresh(args: &Args, index_path: &Path, local: Option<&Path>, attended: Atten
     // The listing is in hand, so compare it with what the index was built
     // from before opening a single file. Conservative -- any doubt rebuilds.
     // This is what makes a hook cheap to fire on every event.
-    if args.if_changed || attended == Attended::No {
+    if (args.if_changed || attended == Attended::No) && !replacing {
         let (verdict, recorded) = stamp::check(index_path, &snap);
         match verdict {
             Verdict::Current => {

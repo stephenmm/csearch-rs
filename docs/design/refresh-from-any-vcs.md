@@ -201,10 +201,20 @@ refresh uses what is stored; a listing flag changes it.
 - `cindex-rs --local`: git inside a repository, a walk elsewhere, unless the
   root already has a source.
 
-`cindex-rs --list --verbose` shows the source of each root. An index in
-format 1 is reported as such, with the command that rebuilds it. A source
-this version does not know, written by a later one, can still be searched;
+`cindex-rs --list --verbose` shows the source of each root. A source this
+version does not know, written by a later one, can still be searched;
 re-indexing it is refused rather than guessed at.
+
+An index in another format (format 1, from 0.3) is reported as such, with the
+command that rebuilds it. `--local` does not need telling: it knows the root
+without reading the index, so it builds the index again -- and since
+`--local --hook` is what git's hooks run, a project index gets over a format
+change at the next git event. A stamp that says no file has changed is not
+allowed to talk it out of that; the stamp's format need not change when the
+index's does. The shared index is different: its roots are in the file that
+cannot be read, so it is left for `--reset`. Nor is anything replaced that
+does not begin with this project's magic. A file under the index's name that
+is damaged, or was never an index, is not ours to overwrite.
 
 ## Concurrency
 

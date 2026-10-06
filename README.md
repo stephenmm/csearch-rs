@@ -529,6 +529,21 @@ identical results from the Linux and Windows builds. CI runs the suite,
 and Intel) for every push, and a pull request cannot merge unless
 `Cargo.toml`'s version has moved.
 
+## Upgrading from 0.3
+
+0.4 changes the index format: an index now records how each of its roots is
+listed. An index is only a cache, so nothing is migrated.
+
+- A project index looks after itself. The next `cindex-rs --local` — or the
+  next git event, where the hooks are installed — builds it again in the new
+  format.
+- The shared index in the home directory has to be rebuilt by hand, because
+  its list of roots is in the file that can no longer be read:
+  `cindex-rs --reset`, then `cindex-rs <dirs>`. Until then both programs say
+  so.
+- Hooks installed by 0.3 go on working. `cindex-rs --install-hooks` rewrites
+  them to run the new `cindex-rs --local --hook`.
+
 ## Upgrading from 0.2
 
 0.3 renamed everything that used to share a name with the original codesearch,

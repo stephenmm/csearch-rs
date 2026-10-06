@@ -9,7 +9,9 @@
 
 mod common;
 
-use common::{command_from, git, have_git, run_from, settle, text, CINDEX, CSEARCH};
+use common::{
+    as_another_format_version, command_from, git, have_git, run_from, settle, text, CINDEX, CSEARCH,
+};
 use csearch::lock;
 use csearch::names::INDEX_FILE_NAME;
 use std::fs;
@@ -394,6 +396,34 @@ fn gits_own_hooks_refresh_the_index_on_a_real_checkout_and_commit() {
     let_refreshes_finish(&index);
     assert!(finds(&root, &home, "alpha", "a.rs"));
     assert!(!finds(&root, &home, "only_on_feature", "b.rs"));
+}
+
+#[test]
+fn gits_hook_builds_again_an_index_left_by_another_version() {
+    // After an upgrade that changes the index format, the first git event
+    // puts things right: `--local --hook` is what git's hooks run. A plain
+    // `--hook`, which has to read the index to know its roots, cannot.
+    let (_dir, root, home) = indexed_tree();
+    let index = root.join(INDEX_FILE_NAME);
+    // The stamp beside it still matches the tree; only the format is wrong.
+    let old = as_another_format_version(&index);
+
+    let out = hook_verbose(&root, &home, &[]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).contains("different index format version"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fs::read(&index).unwrap(), old);
+
+    let out = hook_verbose(&root, &home, &["--local"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        finds(&root, &home, "alpha", "a.txt"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 /// A `cindex-rs --hook --verbose` child, whose output is collected when it

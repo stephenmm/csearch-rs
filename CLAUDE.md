@@ -122,7 +122,7 @@ in CI.
 
 ## Status
 
-Complete and verified. 125 tests; CI builds and tests on Linux, Windows and
+Complete and verified. 128 tests; CI builds and tests on Linux, Windows and
 macOS, gating on rustfmt and clippy before the suite.
 
 **Correctness.** Per-file match counts are identical to the Go original on

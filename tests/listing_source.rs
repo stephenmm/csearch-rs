@@ -5,7 +5,9 @@
 
 mod common;
 
-use common::{git, have_git, run_from, text, with_index, CINDEX, CSEARCH};
+use common::{
+    as_another_format_version, git, have_git, run_from, settle, text, with_index, CINDEX, CSEARCH,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -241,4 +243,77 @@ fn a_source_from_a_newer_version_is_searchable_but_not_guessed_at() {
     assert!(err.contains("warp"), "{err}");
     // The index is left exactly as it was.
     assert_eq!(fs::read(&index).unwrap(), bytes);
+}
+
+#[test]
+fn local_builds_again_an_index_written_by_another_version() {
+    // The format changed in 0.4. An index is a cache, and --local knows what
+    // of, so an old one is no reason to send anybody to --reset.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("p.txt"), "needle\n").unwrap();
+    settle(&root);
+    let home = home_in(dir.path());
+    let index = root.join(csearch::names::INDEX_FILE_NAME);
+    // A real index first, so that its stamp is there and matches the tree:
+    // the stamp's format need not change when the index's does.
+    assert!(run_from(CINDEX, &root, &home, &["--local"])
+        .status
+        .success());
+    let old = as_another_format_version(&index);
+
+    // A search says what is wrong and what to do.
+    let out = run_from(CSEARCH, &root, &home, &["-l", "needle"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("different index format version"),
+        "{}",
+        text(&out.stderr)
+    );
+    // A plain re-index would need the list of roots, which is in the file it
+    // cannot read. It says the same, and leaves the file alone.
+    let out = run_from(CINDEX, &root, &home, &[]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("different index format version"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fs::read(&index).unwrap(), old);
+
+    // --local needs no list. And --if-changed, which the hooks of 0.3 pass,
+    // must not be talked out of it by a stamp saying no file has changed:
+    // none has, and the index still cannot be read.
+    let out = run_from(CINDEX, &root, &home, &["--local", "--if-changed"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("written by another version"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = run_from(CSEARCH, &root, &home, &["-l", "needle"]);
+    assert_eq!(found(&out), ["p.txt"], "{}", text(&out.stderr));
+}
+
+#[test]
+fn local_does_not_replace_a_file_it_cannot_recognise() {
+    // Something else under the index's name -- damaged, or never an index at
+    // all -- is not ours to overwrite on the strength of where it is.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("p.txt"), "needle\n").unwrap();
+    let home = home_in(dir.path());
+    let index = root.join(csearch::names::INDEX_FILE_NAME);
+    for unknown in [
+        &b"notes to self: buy milk\n"[..],
+        &b"csearch-rs"[..],
+        &b""[..],
+    ] {
+        fs::write(&index, unknown).unwrap();
+        let out = run_from(CINDEX, &root, &home, &["--local"]);
+        assert!(!out.status.success(), "replaced {unknown:?}");
+        assert_eq!(fs::read(&index).unwrap(), unknown);
+    }
 }

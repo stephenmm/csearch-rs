@@ -135,3 +135,20 @@ pub fn settle(root: &Path) {
         }
     }
 }
+
+/// Turn the index at `index` into one written by another version of
+/// csearch-rs: this project's magic, a version number that never existed, and
+/// the same length as before -- so that a stamp recorded beside the real
+/// index still describes this file as far as its size goes, and only the
+/// format stands between it and "nothing has changed". Returns what was
+/// written.
+pub fn as_another_format_version(index: &Path) -> Vec<u8> {
+    let len = usize::try_from(fs::metadata(index).unwrap().len()).unwrap();
+    let mut bytes = csearch::write::MAGIC_FAMILY.to_vec();
+    bytes.extend_from_slice(b"0\n");
+    assert!(!bytes.starts_with(csearch::write::MAGIC));
+    assert!(len >= bytes.len(), "the index is too small to stand in for");
+    bytes.resize(len, b'x');
+    fs::write(index, &bytes).unwrap();
+    bytes
+}

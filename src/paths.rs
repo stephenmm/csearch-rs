@@ -1,7 +1,7 @@
 //! Index-file location and path normalisation helpers.
 
 use crate::names::{original, CINDEX, INDEX_ENV};
-use crate::write::MAGIC_FAMILY;
+use crate::write::{MAGIC, MAGIC_FAMILY};
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -81,6 +81,18 @@ pub fn is_csearch_rs_index(path: &Path) -> bool {
         .and_then(|mut f| f.read_exact(&mut head))
         .is_ok()
         && head == *MAGIC_FAMILY
+}
+
+/// True when `path` is a csearch-rs index in some other format than the one
+/// this version reads and writes: this project's magic, another version
+/// number. A file that is merely damaged, or not ours at all, is not.
+pub fn is_other_format_version(path: &Path) -> bool {
+    let mut head = [0u8; MAGIC.len()];
+    File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && head.starts_with(MAGIC_FAMILY)
+        && head != *MAGIC
 }
 
 /// An index csearch-rs left under the original's name before 0.3: the nearest
