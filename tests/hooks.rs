@@ -884,20 +884,16 @@ fn run_script(
         .unwrap()
 }
 
-/// What `echo x | git hash-object --stdin` prints with no wrapper involved:
-/// the hash of exactly the bytes a shell's `echo x` sends down a pipe.
-fn hash_of(bytes: &[u8]) -> String {
-    use std::io::Write;
-    let mut child = Command::new("git")
-        .args(["hash-object", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(bytes).unwrap();
-    text(&child.wait_with_output().unwrap().stdout)
-        .trim()
-        .to_string()
+/// What git calls a file with nothing in it. If this is what comes back from
+/// `echo x | git hash-object --stdin`, nothing went up the pipe.
+const HASH_OF_NOTHING: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+
+/// What a script printed, line by line.
+fn lines_of(out: &Output) -> Vec<String> {
+    text(&out.stdout)
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .collect()
 }
 
 #[test]
@@ -925,73 +921,87 @@ fn a_wrapped_command_behaves_like_the_real_one_and_refreshes_the_index() {
             eprintln!("skipping: {} is not installed", shell.program);
             continue;
         };
-        let dir = tempfile::tempdir().unwrap();
-        let (root, home) = repo_with_a_feature_branch(dir.path());
-        let index = root.join(INDEX_FILE_NAME);
-        assert!(!finds(&root, &home, "only_on_feature", "b.rs"));
-
-        let evals = dir.path().join("evals");
-        let script = script_for(shell, &root, &evals, true);
-        let out = run_script(shell, &program, dir.path(), &home, &script);
         let name = shell.program;
-        assert!(
-            out.status.success(),
-            "{name}: {}\n--- script ---\n{script}\n--- stderr ---\n{}",
-            out.status,
-            text(&out.stderr)
-        );
-        let said = text(&out.stdout);
-        let lines: Vec<&str> = said.lines().map(str::trim_end).collect();
+        // The same script twice, each time in a repository of its own: once
+        // with git as it is, once with git wrapped. What a shell does with a
+        // pipe is the shell's business -- Windows PowerShell on one machine
+        // puts a byte-order mark in front of what it pipes and on another
+        // does not -- so the wrapped run is held to the plain one, and not
+        // to what this test supposes a shell does.
+        let run = |wrapped: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, home) = repo_with_a_feature_branch(dir.path());
+            let evals = dir.path().join("evals");
+            let script = script_for(shell, &root, &evals, wrapped);
+            let out = run_script(shell, &program, dir.path(), &home, &script);
+            assert!(
+                out.status.success(),
+                "{name}: {}\n--- script ---\n{script}\n--- stderr ---\n{}",
+                out.status,
+                text(&out.stderr)
+            );
+            // Used this way git has nothing to say on stderr, and the
+            // wrapper never has.
+            assert_eq!(
+                text(&out.stderr),
+                "",
+                "{name} printed to stderr (wrapped: {wrapped})"
+            );
+            let marks = fs::read_to_string(&evals)
+                .unwrap_or_default()
+                .lines()
+                .count();
+            (dir, root, home, lines_of(&out), marks)
+        };
+        let (_plain_dir, _, _, plain, plain_marks) = run(false);
+        let (_dir, root, home, wrapped, marks) = run(true);
+
+        // First, that the script does what it is for with git as it is.
         // PowerShell prints one line more: what `$?` said after the failure.
         let expected = if shell.ext == "ps1" { 7 } else { 6 };
+        assert_eq!(plain.len(), expected, "{name}: {plain:?}");
+        // Success, success, git's own failure (with a redirection written
+        // after it), and its failure again when run with no arguments.
         assert_eq!(
-            lines.len(),
-            expected,
-            "{name}: {said:?}\n{}",
-            text(&out.stderr)
-        );
-        // Exit statuses pass through: success, success, git's own failure
-        // (with a redirection written after it), and its failure again when
-        // run with no arguments at all.
-        assert_eq!(
-            &lines[..4],
+            &plain[..4],
             ["status=0", "status=0", "status=1", "status=1"],
             "{name}"
         );
         // An argument with a space in it arrived as one argument, and the
-        // command's output went down the pipe.
-        assert_eq!(lines[4], "two words", "{name}");
-        // The argument that leaves a mark each time it is worked out was
-        // worked out once. A wrapper made of text, as csh's is, has to take
-        // care not to read the command line a second time.
-        let marks = fs::read_to_string(&evals).unwrap_or_default();
-        assert_eq!(
-            marks.lines().count(),
-            1,
-            "{name}: an argument was evaluated {} times",
-            marks.lines().count()
-        );
-        // Its input came up a pipe, too. (PowerShell ends a piped line with
-        // the platform's line ending, so there the hash is of one or the
-        // other.)
-        let hashes = [hash_of(b"x\n"), hash_of(b"x\r\n")];
-        assert!(hashes.iter().any(|h| h == lines[5]), "{name}: {}", lines[5]);
-        // In PowerShell the status is in $LASTEXITCODE, as checked above, but
-        // `$?` is true after any function however the command inside it
-        // ended -- so `wrapped-command && next` does not see a failure. The
-        // README says so; this is where that claim is held to account.
-        if shell.ext == "ps1" {
-            assert_eq!(lines[6], "question=True", "{name}");
-        }
-        // The wrapper adds nothing of its own to what the user sees.
-        assert_eq!(text(&out.stderr), "", "{name} printed to stderr");
+        // command's output went down a pipe.
+        assert_eq!(plain[4], "two words", "{name}");
+        // Something came up the other pipe, and the argument that leaves a
+        // mark each time it is worked out left one.
+        assert_eq!(plain[5].len(), 40, "{name}: {}", plain[5]);
+        assert_ne!(plain[5], HASH_OF_NOTHING, "{name}: no input arrived");
+        assert_eq!(plain_marks, 1, "{name}: the script itself is at fault");
 
-        // And the index followed the checkout.
+        // Then, that wrapping git changed none of it.
+        assert_eq!(wrapped.len(), expected, "{name}: {wrapped:?}");
+        assert_eq!(
+            wrapped[..6],
+            plain[..6],
+            "{name}: the wrapped command did not behave like the real one"
+        );
+        // A wrapper made of text, as csh's is, has to take care not to read
+        // the command line a second time.
+        assert_eq!(marks, 1, "{name}: an argument was evaluated {marks} times");
+        // One thing does change, in PowerShell alone. The status is in
+        // $LASTEXITCODE either way, as just compared; but `$?`, false after
+        // a command that failed, is true after any function whatever
+        // happened inside it. The README says so, and this is where that
+        // claim is held to account.
+        if shell.ext == "ps1" {
+            assert_eq!(plain[6], "question=False", "{name}");
+            assert_eq!(wrapped[6], "question=True", "{name}");
+        }
+
+        // And the index followed the wrapped checkout.
         assert!(
             eventually_finds(&root, &home, "only_on_feature", "b.rs"),
             "{name}: the wrapped checkout did not refresh the index"
         );
-        let_refreshes_finish(&index);
+        let_refreshes_finish(&root.join(INDEX_FILE_NAME));
         tested.push(name);
     }
     eprintln!("wrappers tested in: {}", tested.join(", "));

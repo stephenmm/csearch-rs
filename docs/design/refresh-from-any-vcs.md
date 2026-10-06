@@ -97,17 +97,26 @@ cindex-rs --print-hook svn --shell powershell | Out-String | Invoke-Expression
 Without `--shell` the shell is taken from `$SHELL`; where that is unset (plain
 Windows) `--shell` has to be given, rather than guessed.
 
-What the wrapper is held to, in every shell `tests/hooks.rs` can find (CI
-requires a named set on each platform; a missing one is a failure there, not
-a skip):
+The wrapper is held to one thing: the wrapped command behaves as the command
+does. In every shell `tests/hooks.rs` can find (CI requires a named set on
+each platform; a missing one is a failure there, not a skip) the same script
+is run twice, once with the command as it is and once with it wrapped, and
+what the two print is compared. The script covers:
 
-- the command's exit status is the wrapper's;
-- an argument with a space in it arrives as one argument;
-- a redirection written after the command applies to the command;
-- the command run with no arguments at all still works;
-- output goes down a pipe and input comes up one;
-- an argument is evaluated once -- ``-m "`date`"`` runs `date` once;
-- nothing is printed that the command did not print.
+- exit status, of a command that works and of one that fails;
+- an argument with a space in it;
+- a redirection written after the command;
+- the command run with no arguments at all;
+- output going down a pipe, and input coming up one;
+- an argument that must be evaluated once -- ``-m "`date`"`` runs `date`
+  once;
+- stderr, where neither run may print anything.
+
+Comparing with the unwrapped run, rather than with what a shell is supposed
+to do, is not fussiness. The first version of the test expected a piped `x`
+to arrive as `x` and a line ending. On one Windows machine it does. On
+another, Windows PowerShell puts a byte-order mark in front of it -- with the
+wrapper or without.
 
 The wrapper passes the command line on (`--hook --after TOOL -- ARGS`) so
 that a tool whose read-only commands are known can skip the refresh for them.
@@ -123,9 +132,15 @@ None is known in 0.4.
   redirect", and csh then runs none of the line -- and a backquoted argument
   ran twice.
 - **PowerShell sets `$LASTEXITCODE`** to the command's status, as it would be
-  without the wrapper. `$?` is another matter: after a function it is true
-  whatever happened inside, so `p4 sync; if ($?) { ... }` does not see a
-  failure. Test `$LASTEXITCODE`.
+  without the wrapper. `$?` is another matter, and the one difference the
+  test above records rather than forbids: false after a command that failed,
+  it is true after a function whatever happened inside. So
+  `p4 sync; if ($?) { ... }` does not see a failure. Test `$LASTEXITCODE`.
+- **PowerShell pipes text.** What is piped into a wrapped command goes
+  through PowerShell's pipeline, as it does for any function, and is encoded
+  again on the way out. That is what every PowerShell before 7.4 did to all
+  piped input anyway. From 7.4, bytes piped straight from one program into
+  another arrive untouched -- but not if the second one is wrapped.
 - **`cmd.exe` gets no wrapper.** A doskey macro has to mention `$*` twice,
   and `$*` is everything after the command name: `p4 sync && build` would
   run `build` twice. A batch-file shim mangles `%` in arguments. Neither is
