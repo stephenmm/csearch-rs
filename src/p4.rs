@@ -230,13 +230,15 @@ pub fn workspace(dir: &Path) -> Result<Workspace, Error> {
     let client = info
         .text("clientName")
         .ok_or_else(|| Error::Garbled("`p4 info` did not name a client".into()))?;
-    // `p4 info` succeeds for a client the server has never heard of. It just
-    // has no root to report.
+    // `p4 info` succeeds for a client the server has never heard of. It has
+    // no root to report -- and no name either: what comes back as the name
+    // is `*unknown*`, so the message cannot quote the one that was asked for.
     match info.text("clientRoot") {
-        None => Err(Error::Failed(format!(
-            "the server knows no workspace called `{client}` -- check P4CLIENT, or the \
-             P4CONFIG file, for this directory"
-        ))),
+        None => Err(Error::Failed(
+            "the server has no workspace by the client name p4 is using here -- check \
+             P4CLIENT, or the P4CONFIG file, for this directory"
+                .into(),
+        )),
         Some(root) if root == "null" => Ok(Workspace { client, root: None }),
         Some(root) => Ok(Workspace {
             client,

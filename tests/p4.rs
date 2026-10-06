@@ -422,11 +422,13 @@ fn when_perforce_cannot_answer_the_index_is_left_alone() {
     assert_eq!(text(&out.stderr), "");
     assert_eq!(fs::read(&index).unwrap(), before);
 
-    // The server is there, and has never heard of this workspace.
+    // The server is there, and has never heard of this workspace. (p4 does
+    // not say which name it asked about -- it reports the client's name as
+    // `*unknown*` -- so neither can the message.)
     let out = w.run(CINDEX, &ws, "no-such-workspace", &[]);
     assert!(!out.status.success());
     assert!(
-        text(&out.stderr).contains("knows no workspace called `no-such-workspace`"),
+        text(&out.stderr).contains("has no workspace by the client name"),
         "{}",
         text(&out.stderr)
     );
@@ -439,6 +441,12 @@ fn when_perforce_cannot_answer_the_index_is_left_alone() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(w.finds(&ws, "marker_never_added", "build.o"));
     assert!(w.finds(&ws, "marker_edited", "a.c"));
+    // The silent hook above went off to a process of its own. Let it finish
+    // before the directory it is working in is removed.
+    for _ in 0..3 {
+        drop(lock::acquire(&index, || {}));
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }
 
 #[test]
