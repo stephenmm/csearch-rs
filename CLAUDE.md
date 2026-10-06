@@ -130,8 +130,8 @@ own empty server with `P4PORT=rsh:p4d -r ROOT -i`: no daemon, no port.
 
 ## Status
 
-Complete and verified. 143 tests; CI builds and tests on Linux, Windows and
-macOS, gating on rustfmt and clippy before the suite.
+Complete and verified. 146 tests (one of them Unix-only); CI builds and tests
+on Linux, Windows and macOS, gating on rustfmt and clippy before the suite.
 
 **Correctness.** Per-file match counts are identical to the Go original on
 11/11 patterns across two corpora, and to `grep -Ec` on every pattern tried.
