@@ -198,14 +198,221 @@ pub fn activation(tool: &str, shell: Shell, name: &str, program: &str) -> String
 /// that a refresh after it would be wasted. Anything not positively known to
 /// be read-only is assumed to have changed something.
 ///
-/// No tool is known yet: every wrapped command triggers the (cheap) check.
-pub fn is_read_only(_tool: &str, _args: &[OsString]) -> bool {
-    false
+/// Perforce is the one tool known. It is also the one for which this matters
+/// most: checking a Perforce-listed root means asking the server what the
+/// workspace holds, and nobody wants that after every `p4 opened`.
+pub fn is_read_only(tool: &str, args: &[OsString]) -> bool {
+    match tool {
+        "p4" => match p4_command(args) {
+            Parsed::Command(command) => P4_REPORTS.contains(&command),
+            // `p4`, `p4 -V`, `p4 -h`: prints something and is done.
+            Parsed::NoCommand => true,
+            Parsed::Unknown => false,
+        },
+        _ => false,
+    }
+}
+
+/// p4 commands that report and do nothing else: no file in the workspace is
+/// written, removed or made part of it by any of them.
+///
+/// Deliberately not here: `print` (`-o FILE` writes a file), `set` and
+/// `client` (they change which workspace this is, or what it maps), and the
+/// `-n` previews of commands that do change things -- a wasted check after
+/// `p4 sync -n` costs less than a table of every command's flags, and less
+/// than getting one wrong.
+const P4_REPORTS: &[&str] = &[
+    "annotate",
+    "branches",
+    "changelists",
+    "changes",
+    "clients",
+    "counters",
+    "depots",
+    "describe",
+    "diff",
+    "diff2",
+    "dirs",
+    "filelog",
+    "files",
+    "fixes",
+    "fstat",
+    "grep",
+    "groups",
+    "have",
+    "help",
+    "ignores",
+    "info",
+    "interchanges",
+    "jobs",
+    "labels",
+    "login",
+    "logout",
+    "opened",
+    "ping",
+    "protects",
+    "reviews",
+    "sizes",
+    "status",
+    "streams",
+    "tickets",
+    "users",
+    "where",
+    "workspaces",
+];
+
+/// p4's global options that are followed by a value, written either as
+/// `-c NAME` or as `-cNAME`.
+const P4_OPTIONS_WITH_A_VALUE: &[u8] = b"bcCdHLpPQruvxz";
+/// p4's global options that stand alone.
+const P4_FLAGS: &[u8] = b"eGIqRs";
+
+enum Parsed<'a> {
+    Command(&'a str),
+    NoCommand,
+    Unknown,
+}
+
+/// The command in a p4 command line: the first word after p4's own options.
+///
+/// Only as much is read as is needed to find it, and anything not understood
+/// is `Unknown` rather than skipped. From the csh wrapper the words arrive
+/// quoted, so a redirection the user typed is among them (`>`, `log`) and a
+/// quoted argument still has its quotes; both come after the command, where
+/// nothing is read.
+fn p4_command(args: &[OsString]) -> Parsed<'_> {
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        let Some(word) = word.to_str() else {
+            return Parsed::Unknown;
+        };
+        let Some(option) = word.strip_prefix('-') else {
+            return Parsed::Command(word);
+        };
+        match option.as_bytes() {
+            // -V and -h print and exit, whatever follows them.
+            [b'V'] | [b'h'] | [b'?'] => return Parsed::NoCommand,
+            [flag] if P4_FLAGS.contains(flag) => {}
+            // The value is the next word...
+            [option] if P4_OPTIONS_WITH_A_VALUE.contains(option) => {
+                words.next();
+            }
+            // ...or the rest of this one.
+            [option, _, ..] if P4_OPTIONS_WITH_A_VALUE.contains(option) => {}
+            _ => return Parsed::Unknown,
+        }
+    }
+    Parsed::NoCommand
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_only(tool: &str, line: &str) -> bool {
+        let args: Vec<OsString> = line.split_whitespace().map(OsString::from).collect();
+        is_read_only(tool, &args)
+    }
+
+    #[test]
+    fn perforce_commands_that_only_report_skip_the_refresh() {
+        for line in [
+            "opened",
+            "files //depot/...",
+            "changes -m 5 ...",
+            "describe -s 1234",
+            "diff -du a.c",
+            "have",
+            "fstat -Ro //ws/...",
+            "status",
+            "login",
+            "info",
+            // Nothing to run at all.
+            "",
+            "-V",
+            "-h",
+            // Behind p4's own options, with the value apart or attached.
+            "-c my-client opened",
+            "-cmy-client opened",
+            "-p ssl:perforce:1666 -u me -c ws changes -m1",
+            "-G -s opened",
+            "-ztag fstat a.c",
+            "-z tag fstat a.c",
+            "-vnet.maxwait=60 files ...",
+            "-x - have",
+            "-d /some/dir opened",
+            // What the csh wrapper hands over: the user's redirection, and
+            // quotes that are still quotes.
+            "opened > log",
+            "opened >& /dev/null",
+            "-c 'my' opened",
+        ] {
+            assert!(read_only("p4", line), "p4 {line}");
+        }
+    }
+
+    #[test]
+    fn perforce_commands_that_may_change_a_file_do_not() {
+        for line in [
+            "sync",
+            "sync ...@1234",
+            "submit -d message",
+            "revert ...",
+            "unshelve -s 1234",
+            "integrate //a/... //b/...",
+            "resolve -am",
+            "add new.c",
+            "edit a.c",
+            "delete a.c",
+            "move a.c b.c",
+            "reconcile",
+            "clean",
+            "flush",
+            "update",
+            "switch other-stream",
+            "client",
+            "set P4CLIENT=other",
+            // Reporting commands that can write a file after all.
+            "print -o out.c //depot/a.c",
+            "print //depot/a.c",
+            // A preview is not looked into: sync -n is treated as sync.
+            "sync -n",
+            // Behind options.
+            "-c my-client sync",
+            "-cmy-client sync",
+            "-x files.txt edit",
+            // A command this does not know.
+            "frobnicate",
+            "Opened",
+            // An option this does not know: nothing after it is trusted.
+            "-Y opened",
+            "--field x=y opened",
+            "- opened",
+            "-Gs opened",
+            // What looks like the command is an option's value.
+            "-c opened sync",
+        ] {
+            assert!(!read_only("p4", line), "p4 {line}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_known_about_any_other_tool() {
+        for tool in ["svn", "git", "hg", "p4v", "P4", "p4.exe", ""] {
+            for line in ["opened", "status", "log", "info", ""] {
+                assert!(!read_only(tool, line), "{tool} {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_list_of_reporting_commands_is_sorted_and_single() {
+        // So that a reviewer can see at a glance what is and is not on it.
+        let mut sorted = P4_REPORTS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted, P4_REPORTS);
+    }
 
     #[test]
     fn shells_are_recognised_by_name_or_path() {

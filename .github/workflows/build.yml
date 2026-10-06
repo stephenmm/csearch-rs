@@ -137,6 +137,41 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fish tcsh zsh ksh mercurial
 
+      # Perforce itself, so that tests/p4.rs talks to a real server through a
+      # real client instead of to our idea of one. Both come straight from
+      # Perforce, as git's own CI gets them. Nothing is installed or started:
+      # the tests run p4d over a pipe, one per command (P4PORT=rsh:...), and an
+      # unlicensed p4d is good for five users, which is four more than needed.
+      #
+      # The release is pinned; the files are not, because Perforce patches a
+      # release in place under the same URL and a checksum would break on
+      # every patch. CSEARCH_RS_REQUIRE_P4 makes a missing p4 a failure here,
+      # where on a developer's machine it is a skip.
+      - name: Install Perforce (p4 and p4d)
+        shell: bash
+        env:
+          P4_RELEASE: r24.2
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            Linux)   platform=bin.linux26x86_64; exe="" ;;
+            Windows) platform=bin.ntx64;         exe=".exe" ;;
+            macOS)   platform=bin.macosx12arm64; exe="" ;;
+            *) echo "no Perforce build known for ${{ runner.os }}"; exit 1 ;;
+          esac
+          dest="$RUNNER_TEMP/p4bin"
+          mkdir -p "$dest"
+          for tool in p4 p4d; do
+            curl --fail --silent --show-error --location --retry 3 \
+              --output "$dest/$tool$exe" \
+              "https://cdist2.perforce.com/perforce/$P4_RELEASE/$platform/$tool$exe"
+            chmod +x "$dest/$tool$exe"
+          done
+          "$dest/p4$exe" -V | grep -i '^Rev\.'
+          "$dest/p4d$exe" -V | grep -i '^Rev\.'
+          echo "$dest" >> "$GITHUB_PATH"
+          echo "CSEARCH_RS_REQUIRE_P4=1" >> "$GITHUB_ENV"
+
       # Lint before testing so a style or clippy failure surfaces in seconds.
       # fmt is platform-independent, so once is enough; clippy runs on both
       # legs because cfg(windows) code is only linted where it compiles.

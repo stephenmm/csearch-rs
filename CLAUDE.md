@@ -62,11 +62,12 @@ src/write.rs     parallel index builder + on-disk format; planning the roots
 src/read.rs      mmap reader, delta-varint posting lists, query evaluation
 src/varint.rs    varint encode/decode
 src/paths.rs     index path resolution; pre-0.3 leftovers; repo root; sidecars
-src/listing.rs   which files belong to a root (walk | git); tree fingerprint
+src/listing.rs   which files belong to a root (walk | git | p4); fingerprint
+src/p4.rs        Perforce: `p4 -G` reader, workspace root, have + opened files
 src/stamp.rs     <index>.meta: what the index was built from (--if-changed)
 src/lock.rs      one refresh of an index at a time; the hooks' queue
 src/githead.rs   HEAD read from the repository's files, without running git
-src/hook.rs      --print-hook: the wrapper for each shell
+src/hook.rs      --print-hook: the wrapper for each shell; p4's read-only commands
 src/bin/cindex.rs   -> cindex-rs
 src/bin/csearch.rs  -> csearch-rs
 
@@ -80,6 +81,7 @@ tests/listing_source.rs    the index remembers how each root is listed
 tests/refresh.rs           --if-changed, --background, the lock, staleness
 tests/githead.rs           HEAD from files agrees with git, layout by layout
 tests/hooks.rs             --hook; git's and Mercurial's hooks; shell wrappers
+tests/p4.rs                Perforce against a real p4d: listing, sync, submit
 tests/names.rs             our names are ours; --help never names theirs
 tests/coexist.rs           side by side with the original, stand-in and real
 
@@ -120,10 +122,16 @@ On this Windows machine that means sh, bash and dash from Git, and Windows
 PowerShell; zsh, ksh, fish, tcsh, csh, pwsh and Mercurial are exercised only
 in CI.
 
+`tests/p4.rs` needs Perforce's `p4` and `p4d` on PATH and skips without them;
+`CSEARCH_RS_REQUIRE_P4=1` (set in CI, which downloads both) makes that a
+failure. Neither is installed on this machine, so **nothing Perforce-specific
+has ever run here** -- every claim about it rests on CI. Each test makes its
+own empty server with `P4PORT=rsh:p4d -r ROOT -i`: no daemon, no port.
+
 ## Status
 
-Complete and verified. 128 tests; CI builds and tests on Linux, Windows and
-macOS, gating on rustfmt and clippy before the suite.
+Complete and verified. 146 tests (one of them Unix-only); CI builds and tests
+on Linux, Windows and macOS, gating on rustfmt and clippy before the suite.
 
 **Correctness.** Per-file match counts are identical to the Go original on
 11/11 patterns across two corpora, and to `grep -Ec` on every pattern tried.
@@ -170,6 +178,15 @@ refreshes of one index take turns, and a burst of hooks collapses to one
 running and one waiting. A hook that cannot list a root the way the index
 records leaves the index alone instead of walking. Design:
 `docs/design/refresh-from-any-vcs.md`.
+
+**Perforce.** Since 0.5. Perforce has no client-side hooks at all (triggers
+are server-side, `p4 aliases` cannot run a program), so its "hook" is the
+shell wrapper from `--print-hook p4`, which skips the refresh after commands
+that only report. `--p4` lists a root through Perforce -- `p4 have` plus
+opened files, read with `p4 -G` -- and `--local --p4` puts the index at the
+workspace root. A Perforce listing that fails is always an error, never a
+walk: the server being out of reach is routine, and a workspace is where the
+build products are. Design: `docs/design/perforce.md`.
 
 **Distribution.** BSD-3-Clause, matching upstream, with the derivation recorded
 in NOTICE. `build_standalone.py` produces a static-CRT Windows binary (no VC++

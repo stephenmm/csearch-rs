@@ -1,7 +1,7 @@
 //! cindex-rs — build the trigram index.
 //!
 //!   cindex-rs [--verbose] [--indexpath FILE] [-j N] [PATH...]
-//!   cindex-rs --git | --walk     how to list the files (remembered per root)
+//!   cindex-rs --git | --p4 | --walk   how to list the files (remembered per root)
 //!   cindex-rs --local            per-project index at the repository root
 //!   cindex-rs --if-changed       rebuild only if a file has changed
 //!   cindex-rs --hook             refresh the index covering this directory:
@@ -23,6 +23,7 @@ use csearch::hook::{self, Shell};
 use csearch::listing::{self, snapshot, ListOptions, Root, Source};
 use csearch::lock::{self, Turn};
 use csearch::names::CINDEX;
+use csearch::p4;
 use csearch::paths::{
     canonical_string, default_index_path, find_repo_root, is_other_format_version,
     legacy_index_beside, sidecar, with_upgrade_notes, INDEX_FILE_NAME,
@@ -82,6 +83,11 @@ struct Args {
     /// --git.
     #[arg(long, alias = "no-git")]
     walk: bool,
+    /// Take the file list from Perforce: what the workspace has synced from
+    /// the depot, plus what is opened in it. Applies and is remembered like
+    /// --git. With --local, the index goes at the root of the workspace.
+    #[arg(long, conflicts_with_all = ["git", "walk", "install_hooks", "uninstall_hooks"])]
+    p4: bool,
     /// Skip the rebuild if no file has been added, removed or modified since
     /// the last one.
     #[arg(long)]
@@ -348,10 +354,20 @@ fn print_hook(tool: &str, shell: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// The repository root for --local / --install-hooks: the enclosing repo, or
-/// the working directory when there is none.
-fn local_root() -> Result<PathBuf> {
+/// The root for --local / --install-hooks: with --p4 the root of the Perforce
+/// workspace, otherwise the enclosing git repository, or the working
+/// directory when there is none.
+///
+/// Perforce has to be asked for, not noticed. A git repository announces
+/// itself with a `.git` directory; a Perforce workspace is a line in a spec
+/// on a server, and finding out means a round trip that nobody who typed
+/// `--local` in some unrelated directory should have to wait for.
+fn local_root(args: &Args) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("reading the working directory")?;
+    if args.p4 {
+        return p4::workspace_root(&cwd)
+            .map_err(|e| anyhow!("cannot find the Perforce workspace for this directory: {e}"));
+    }
     Ok(find_repo_root(&cwd).unwrap_or(cwd))
 }
 
@@ -404,12 +420,12 @@ fn run(args: &Args) -> Result<()> {
     }
 
     if args.uninstall_hooks {
-        return uninstall_hooks(&local_root()?);
+        return uninstall_hooks(&local_root(args)?);
     }
 
     // --local and --install-hooks both anchor on the repository root.
     let root = if args.local || args.install_hooks {
-        Some(local_root()?)
+        Some(local_root(args)?)
     } else {
         None
     };
@@ -521,7 +537,7 @@ fn run_hook(args: &Args) {
 fn hook_refresh(args: &Args, say: &dyn Fn(std::fmt::Arguments)) -> Result<()> {
     let cwd = std::env::current_dir().context("reading the working directory")?;
     let root = if args.local {
-        Some(local_root()?)
+        Some(local_root(args)?)
     } else {
         None
     };
@@ -612,11 +628,16 @@ fn refresh(args: &Args, index_path: &Path, local: Option<&Path>, attended: Atten
     } else {
         Vec::new()
     };
-    let listing = match (args.git, args.walk) {
-        (true, _) => Some(Source::Git),
-        (_, true) => Some(Source::Walk),
-        _ => None,
+    let listing = if args.git {
+        Some(Source::Git)
+    } else if args.walk {
+        Some(Source::Walk)
+    } else if args.p4 {
+        Some(Source::P4)
+    } else {
+        None
     };
+    let created = !index_path.exists();
     let add = args.paths();
     let plan = plan_roots(&Request {
         stored: &stored,
@@ -693,6 +714,18 @@ fn refresh(args: &Args, index_path: &Path, local: Option<&Path>, attended: Atten
 
     if local.is_some() {
         eprintln!("{CINDEX}: local index at {}", index_path.display());
+        // git is told to ignore the index, in a file of its own that nobody
+        // commits. Perforce's ignore file is the user's, and usually checked
+        // in, so it is not ours to edit -- but left unsaid, the next
+        // `p4 reconcile` offers the index to the depot. Said once, when the
+        // index first appears.
+        if created && snap.roots.iter().any(|r| r.source == Source::P4) {
+            eprintln!(
+                "{CINDEX}: note: Perforce does not know to leave the index alone. Add the \
+                 line `{INDEX_FILE_NAME}*` to your P4IGNORE file, or `p4 reconcile` will \
+                 offer to add it to the depot"
+            );
+        }
     }
     // An index csearch-rs 0.2 left here under the original's name is dead
     // weight now. Say so; never delete it -- that name is not ours any more.

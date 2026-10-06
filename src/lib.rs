@@ -17,6 +17,7 @@ pub mod hook;
 pub mod listing;
 pub mod lock;
 pub mod names;
+pub mod p4;
 pub mod paths;
 pub mod query;
 pub mod read;
