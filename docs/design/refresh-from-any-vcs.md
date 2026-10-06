@@ -120,7 +120,7 @@ wrapper or without.
 
 The wrapper passes the command line on (`--hook --after TOOL -- ARGS`) so
 that a tool whose read-only commands are known can skip the refresh for them.
-None is known in 0.4.
+None was known in 0.4; Perforce is since 0.5 ([Perforce](perforce.md)).
 
 ### Per-shell notes
 

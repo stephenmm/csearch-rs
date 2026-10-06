@@ -1,10 +1,10 @@
 //! Which files belong to a root, and whether any of them has changed.
 //!
-//! Each root is *listed* from a source: a directory walk, or what git
-//! considers part of the work tree. The index records the source of every
-//! root, so that a refresh lists a root the way the index was built. Without
-//! that, an index made from `git ls-files` would be rebuilt by walking, and
-//! every ignored file would arrive in it.
+//! Each root is *listed* from a source: a directory walk, what git considers
+//! part of the work tree, or what Perforce holds in the workspace. The index
+//! records the source of every root, so that a refresh lists a root the way
+//! the index was built. Without that, an index made from `git ls-files` would
+//! be rebuilt by walking, and every ignored file would arrive in it.
 //!
 //! A listing, with each file's size and modification time, is a [`Snapshot`].
 //! Its fingerprint is what `--if-changed` compares, so no version-control
@@ -12,6 +12,7 @@
 //! hook from any of them, or from none, refresh an index cheaply.
 
 use crate::names::CINDEX;
+use crate::p4;
 use anyhow::{bail, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -28,16 +29,21 @@ pub enum Source {
     /// What git considers part of the work tree: tracked files, plus
     /// untracked ones that are not ignored.
     Git,
+    /// What Perforce holds in the workspace: files synced from the depot,
+    /// plus files opened here and not yet submitted. Files Perforce has not
+    /// been told about are not in it.
+    P4,
 }
 
 impl Source {
-    pub const ALL: [Source; 2] = [Source::Walk, Source::Git];
+    pub const ALL: [Source; 3] = [Source::Walk, Source::Git, Source::P4];
 
     /// The name stored in the index and shown by `--list --verbose`.
     pub fn tag(self) -> &'static str {
         match self {
             Source::Walk => "walk",
             Source::Git => "git",
+            Source::P4 => "p4",
         }
     }
 
@@ -89,9 +95,10 @@ pub struct Snapshot {
 pub struct ListOptions {
     /// Files larger than this are left out, and counted.
     pub max_file_bytes: u64,
-    /// When a version-control listing cannot be had, fail instead of walking.
-    /// An unattended refresh sets this: walking would replace the index with
-    /// a different set of files, and the next run would swap them back.
+    /// When git cannot list a root, fail instead of walking. An unattended
+    /// refresh sets this: walking would replace the index with a different
+    /// set of files, and the next run would swap them back. (A Perforce
+    /// listing that fails is an error whether or not this is set.)
     pub strict: bool,
 }
 
@@ -342,9 +349,18 @@ fn newest_if_coarse(files: &[FileEntry]) -> Option<SystemTime> {
 
 /// List the files under `roots`, each from its own source.
 ///
-/// A root whose version-control listing is unavailable is walked instead,
-/// with the reason on stderr -- unless `opts.strict`, in which case that is
-/// an error and nothing is listed.
+/// A root that git cannot list is walked instead, with the reason on stderr
+/// -- unless `opts.strict`, in which case that is an error and nothing is
+/// listed.
+///
+/// A root that Perforce cannot list is always an error. git fails when
+/// something is wrong with the machine, which is rare and worth working
+/// round. Perforce fails whenever the server is out of reach or the ticket
+/// has run out, which is every evening on the train; and a Perforce
+/// workspace is where the build products are. Walking it "for now" would
+/// index the lot, and the next refresh with the server back would throw it
+/// all out again. Better that the index stay as it was and the reason be
+/// given.
 pub fn snapshot(roots: &[Root], opts: &ListOptions) -> Result<Snapshot> {
     let taken_at = SystemTime::now();
     let mut files = Vec::new();
@@ -386,6 +402,14 @@ pub fn snapshot(roots: &[Root], opts: &ListOptions) -> Result<Snapshot> {
                     walk(&root.path, opts, &mut files, &mut too_large);
                 }
             },
+            Source::P4 => match p4::files(&root.path) {
+                Ok(listed) => keep_listed(&root.path, listed, opts, &mut files, &mut too_large),
+                Err(e) => bail!(
+                    "{}: Perforce could not list the files ({e}). The index is as it was; \
+                     `{CINDEX} --walk` would index this directory by walking it instead",
+                    root.path
+                ),
+            },
         }
         newest_coarse_mtime = newest_coarse_mtime.max(newest_if_coarse(&files[start..]));
     }
@@ -425,6 +449,7 @@ mod tests {
         for s in Source::ALL {
             assert_eq!(Source::from_tag(s.tag()), Some(s));
         }
+        assert_eq!(Source::from_tag("p4"), Some(Source::P4));
         assert_eq!(Source::from_tag("svn"), None);
         assert_eq!(Source::from_tag(""), None);
     }

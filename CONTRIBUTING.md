@@ -60,6 +60,12 @@ platform-specific, expect the other platform to have an opinion.
   skips, with a message, the ones that are not installed.
   `CSEARCH_RS_REQUIRE_SHELLS=bash,zsh,...` and `CSEARCH_RS_REQUIRE_HG=1` turn
   those skips into failures; CI sets both, per platform, in the build matrix.
+- `tests/p4.rs` runs against Perforce's own `p4` and `p4d`, with an empty
+  server per test and no daemon (`P4PORT=rsh:p4d -r ROOT -i` runs one p4d
+  per command, over a pipe). The tests skip, with a message, where the two
+  programs are not on `PATH`; CI downloads them and sets
+  `CSEARCH_RS_REQUIRE_P4=1`. Both are free downloads from Perforce and need
+  no licence for this.
 - Those tests start processes and wait for them. When one needs another
   process to have got somewhere, it waits for evidence of that -- a line on
   stderr, a file appearing, a lock being taken -- and never for a length of

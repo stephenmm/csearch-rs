@@ -147,6 +147,33 @@ things to know:
   can pass a command line through unharmed. PowerShell and Git Bash both work
   on Windows.
 
+**Perforce**, start to finish. It runs no hooks on your machine, so this is
+the wrapper above, plus a file list taken from Perforce itself:
+
+```sh
+cd ~/ws/project
+cindex-rs --local --p4                                 # index the workspace, at its root
+eval "$(cindex-rs --print-hook p4 --shell bash)"       # in ~/.bashrc; see above for other shells
+```
+
+From then on a `p4 sync`, a `p4 submit`, a `p4 revert`, an unshelve — any p4
+command that can change a file — is followed by a refresh in the background.
+Commands that only report (`p4 opened`, `p4 changes`, `p4 diff`, …) are
+recognised, and nothing is started after them.
+
+- `--p4` lists what Perforce holds in the workspace: the files synced from
+  the depot, plus the files you have opened. That keeps build output out, as
+  `--git` does. It also means a new file is indexed once it is `p4 add`ed,
+  not before; `--walk` indexes everything instead.
+- The listing needs the server. If it cannot be reached, or your ticket has
+  run out, the index is left as it is and `cindex-rs` says why. It does not
+  fall back to walking the directory.
+- Add the line `.csearch-rs-index*` to your `P4IGNORE` file, or
+  `p4 reconcile` will offer the index to the depot. (`cindex-rs` says so
+  when it first builds one.)
+- P4V does not go through your shell. For that, schedule `cindex-rs --hook`
+  as below.
+
 **Anything else** — a GUI client, a sync tool, a build that generates code —
 can be covered by running the same command in the tree on a schedule, or from
 a file watcher or an editor:
@@ -172,8 +199,9 @@ stale result is never silently trusted.
 | `--batch-mib N` | source bytes buffered per batch (default 256) |
 | `--verbose` | list every skipped file and progress |
 | `--git` | take the file list from `git ls-files`, so ignored files are never indexed |
+| `--p4` | take the file list from Perforce: what the workspace has synced, plus opened files |
 | `--walk` | list by walking the directory instead (`--no-git` is the older spelling) |
-| `--local` | per-project index at the repository root; a repository is listed through git |
+| `--local` | per-project index at the repository root (listed through git), or with `--p4` at the workspace root |
 | `--if-changed` | rebuild only if a file was added, removed or modified since the last build |
 | `--background` | do the work in a detached process and return immediately |
 | `--hook` | refresh the index that covers this directory: `--if-changed` and `--background`, silent, always exit 0, and a no-op where there is no index |
@@ -182,11 +210,11 @@ stale result is never silently trusted.
 | `--install-hooks` | install git hooks that refresh the local index on every git event (implies `--local`) |
 | `--uninstall-hooks` | remove those hooks |
 
-`--git` and `--walk` say how a root's files are listed, and the index
+`--git`, `--p4` and `--walk` say how a root's files are listed, and the index
 remembers the answer for each root: a later `cindex-rs` lists every root the
-way it was listed before. Given with paths, either flag applies to those
-paths; given alone, to every root. `cindex-rs --list --verbose` shows which is
-in force.
+way it was listed before. Given with paths, a flag applies to those paths;
+given alone, to every root. `cindex-rs --list --verbose` shows which is in
+force.
 
 ### Search — `csearch-rs`
 
@@ -514,6 +542,11 @@ the shells each platform must have — sh, bash, dash, zsh, ksh, fish and tcsh
 on Linux; sh, bash, dash, zsh, ksh, tcsh and csh on macOS; both PowerShells
 and Git's bash on Windows — and fails if one is missing. Elsewhere a shell
 that is not installed is skipped with a message.
+
+`tests/p4.rs` does the same for Perforce, against Perforce's own `p4` and
+`p4d`: an empty server per test, real workspaces, a sync, a submit, a server
+that cannot be reached. CI downloads both programs on every platform and
+fails without them; elsewhere the tests skip with a message.
 
 `tests/coexist.rs` and `tests/names.rs` hold the project to not sharing a name
 with the original: the binaries, index file and variable are checked against
