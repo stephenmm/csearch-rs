@@ -237,13 +237,6 @@ fn a_workspace_is_listed_the_way_perforce_sees_it() {
 
     let out = w.run(CINDEX, &ws, "ws", &["--local", "--p4"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    // Perforce has no ignore file that is ours to write to, so the user is
-    // told, this once, what to put in theirs.
-    assert!(
-        text(&out.stderr).contains("P4IGNORE"),
-        "{}",
-        text(&out.stderr)
-    );
 
     // The index says how its one root is listed.
     let listed = w.run(CINDEX, &ws, "ws", &["--list", "--verbose"]);
@@ -268,17 +261,45 @@ fn a_workspace_is_listed_the_way_perforce_sees_it() {
     assert!(!w.finds(&ws, "marker_never_added", "build.o"));
     assert!(!w.finds(&ws, "marker_deleted", "gone.c"));
 
-    // A plain re-index lists the same way, and has no more to say about
-    // P4IGNORE.
+    // A plain re-index lists the same way.
     let out = w.run(CINDEX, &ws, "ws", &[]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(
-        !text(&out.stderr).contains("P4IGNORE"),
-        "{}",
-        text(&out.stderr)
-    );
     assert!(w.finds(&ws, "marker_opened_for_add", "new.c"));
     assert!(!w.finds(&ws, "marker_never_added", "build.o"));
+}
+
+#[test]
+fn the_first_index_in_a_workspace_says_what_to_tell_p4ignore() {
+    // git is told to ignore the index, in a file of its own that nobody
+    // commits. Perforce's ignore file is the user's, so it is left alone --
+    // and the user is told, once, what to put in it, before `p4 reconcile`
+    // offers the index to the depot.
+    let Some(w) = World::new() else { return };
+    let ws = w.client("ws");
+    w.submit_new(&ws, "ws", &[("a.c", "int marker;\n")], "one");
+    settle(&ws);
+    let says_so = |out: &Output| {
+        let err = text(&out.stderr);
+        err.contains("P4IGNORE") && err.contains(&format!("{INDEX_FILE_NAME}*"))
+    };
+
+    let out = w.run(CINDEX, &ws, "ws", &["--local", "--p4"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(says_so(&out), "{}", text(&out.stderr));
+    // Not on every build after that.
+    for again in [&[][..], &["--local", "--p4"][..]] {
+        let out = w.run(CINDEX, &ws, "ws", again);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert!(!says_so(&out), "{again:?}: {}", text(&out.stderr));
+    }
+    // And not for an index that is not listed through Perforce, whose owner
+    // has not said this is a Perforce workspace at all.
+    let plain = w.dir.path().join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("x.c"), "int marker;\n").unwrap();
+    let out = w.run(CINDEX, &plain, "ws", &["--local"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!says_so(&out), "{}", text(&out.stderr));
 }
 
 #[test]
