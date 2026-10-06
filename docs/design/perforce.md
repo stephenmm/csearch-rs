@@ -97,6 +97,11 @@ would think:
 - Windows, where a spec can say `c:\ws` for `C:\ws`, or hold an 8.3 name
   such as `C:\Users\RUNNER~1\...`.
 
+This is observed, not assumed. Asked from the canonical directory, with
+`-d` naming it, p4 r24.2 still prints every path under the Root as the spec
+spells it: `/tmp/x/link/a.c` for a workspace at `/tmp/x/real`,
+`/var/folders/...` on macOS, `c:\users\runner~1\...` on Windows.
+
 So the client root is taken from `p4 info`, made canonical once, and every
 path p4 prints has the one exchanged for the other before it is looked for
 under the index's root. A client with no single root (`Root: null`, used by
@@ -126,6 +131,12 @@ index this directory by walking it instead
 From a hook that is silent, as everything from a hook is; `cindex-rs --hook
 --verbose` says it.
 
+A workspace the server has never heard of is a failure of the same kind.
+`p4 info` succeeds for one; it simply reports no root -- and reports the
+client's name as `*unknown*` rather than as the name it was asked about. So
+the message cannot quote the name, and points at where it comes from instead:
+`P4CLIENT`, or the `P4CONFIG` file for that directory.
+
 ## The index and `p4 reconcile`
 
 git is told to ignore the index in `info/exclude`, a file nobody commits.
@@ -144,14 +155,55 @@ pick and nothing to wait for. CI downloads both programs on Linux, Windows
 and macOS and fails if they are missing (`CSEARCH_RS_REQUIRE_P4`); elsewhere
 the tests skip with a message.
 
-They cover: a workspace listed from a subdirectory, with a synced file, a
-file opened for add, a file opened for delete and a file never added; another
-workspace submitting, `p4 sync` bringing it in, and the hook picking it up; a
-submit from here; the hook after a reporting command doing nothing; the
-server out of reach and a workspace it has never heard of, attended and from
-a hook; `--p4` asked from outside the workspace; a Root spelled through a
-symbolic link; and `p4` wrapped in a real shell with `p4 sync` typed and
-nothing else.
+They cover:
+
+- a workspace with a synced file, a file opened for add, a file opened for
+  delete and a file never added;
+- `--local --p4` typed three directories down, and from outside the
+  workspace;
+- one index over two workspaces, each named by a `P4CONFIG` file, refreshed
+  from inside either;
+- another workspace submitting, `p4 sync` bringing it in, and the hook
+  picking it up; then a submit from here;
+- the hook after a reporting command, doing nothing;
+- the server out of reach, and a workspace it has never heard of, attended
+  and from a hook;
+- a Root spelled through a symbolic link (macOS and Windows spell every
+  temporary directory two ways, so there every test is this one);
+- the note about `P4IGNORE`: once, and only for a root listed through
+  Perforce;
+- `p4` wrapped in a real shell, with `p4 sync` typed and nothing else.
+
+### Seeing the guards fail
+
+A test that has only ever passed proves nothing, and these cannot run where
+the code was written: Perforce is not installed there. So the guards were
+broken on purpose in CI instead. Eleven mutations, on throwaway branches
+whose workflow does nothing but install Perforce and run `tests/p4.rs`,
+grouped so that no two in a run break the same test:
+
+| Broken on purpose | Tests that then failed |
+|---|---|
+| a listing that fails falls back to walking | the server out of reach |
+| a root listed through Perforce is walked once p4 has answered | the workspace listing |
+| files opened here are not asked for | the workspace listing |
+| the client root's spelling is not exchanged for the canonical one | the Root through a link -- and on macOS and Windows, every test that lists |
+| p4 is not told which directory it is being asked about | two workspaces in one index |
+| `--local --p4` takes the working directory for the root | the index at the root; asked from outside |
+| `--local --p4` is accepted from outside the workspace | asked from outside |
+| a reporting command starts a refresh like any other | the reporting command |
+| every p4 command is taken for a reporting one | sync and submit; the reporting command; the wrapped `p4 sync` |
+| the `P4IGNORE` note is never printed | the note |
+| the `P4IGNORE` note is printed on every build | the note |
+
+In each run the tests not named stayed green. The grouping matters: the
+first attempt put "walked once p4 has answered" in the same run as the
+spelling mutation, and the second hid the first -- a walk does not use p4's
+paths at all.
+
+The parts that need no server -- the marshal reader, what counts as a
+failure, where a path lands, the table of reporting commands -- have unit
+tests, with fifteen more mutations seen red on the development machine.
 
 ## Limits
 
