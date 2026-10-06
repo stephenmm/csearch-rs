@@ -13,6 +13,7 @@
 //! original without either disturbing the other.
 
 pub mod githead;
+pub mod hook;
 pub mod listing;
 pub mod lock;
 pub mod names;

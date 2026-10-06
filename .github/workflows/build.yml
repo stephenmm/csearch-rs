@@ -44,16 +44,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `shells` and `hg`, on every leg: tests/hooks.rs runs the wrapper
+          # `cindex-rs --print-hook` writes in each shell it finds, and the
+          # README's Mercurial recipe in a real repository, and skips what is
+          # not installed. Here that would be coverage quietly lost, so each
+          # leg names what it must find; absent is a failure.
+          #
           # musl links fully static: no glibc version floor, runs on any distro.
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             rustflags: ""
+            shells: sh,bash,dash,zsh,ksh,fish,tcsh
+            hg: "1"
           # +crt-static drops the VC++ redistributable dependency.
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             rustflags: "-C target-feature=+crt-static"
+            # Both PowerShells, and the bash that comes with Git for Windows.
+            shells: powershell,pwsh,bash
+            hg: ""
           # Both mac legs run on the same free arm64 runner (macos-latest):
           # Xcode's own toolchain cross-compiles to x86_64-apple-darwin from
           # Apple Silicon out of the box (it's how Xcode itself builds
@@ -67,14 +78,19 @@ jobs:
           # of this writing, macos-14 is deprecated) faster than Ubuntu or
           # Windows ones, so a pin needs periodic manual bumping to avoid a
           # job that queues forever with no runner left to serve it.
+          # macOS ships every one of these itself; csh there is tcsh.
           - name: macos-arm64
             os: macos-latest
             target: aarch64-apple-darwin
             rustflags: ""
+            shells: sh,bash,dash,zsh,ksh,tcsh,csh
+            hg: ""
           - name: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
             rustflags: ""
+            shells: sh,bash,dash,zsh,ksh,tcsh,csh
+            hg: ""
 
     steps:
       - uses: actions/checkout@v7
@@ -111,6 +127,16 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           echo "CSEARCH_RS_REQUIRE_ORIGINAL=1" >> "$GITHUB_ENV"
 
+      # The shells and the version-control system the matrix asks the Linux
+      # leg for. Installed by name rather than trusted to be on the image,
+      # whose contents move under the `-latest` label.
+      - name: Install shells and Mercurial (linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fish tcsh zsh ksh mercurial
+
       # Lint before testing so a style or clippy failure surfaces in seconds.
       # fmt is platform-independent, so once is enough; clippy runs on both
       # legs because cfg(windows) code is only linted where it compiles.
@@ -127,6 +153,8 @@ jobs:
       - name: Test
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          CSEARCH_RS_REQUIRE_SHELLS: ${{ matrix.shells }}
+          CSEARCH_RS_REQUIRE_HG: ${{ matrix.hg }}
         run: cargo test --release --target ${{ matrix.target }}
 
       - name: Build

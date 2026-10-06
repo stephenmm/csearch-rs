@@ -89,25 +89,81 @@ so that index always covers every root you have added.
 
 ### Keeping the index fresh
 
-An index reflects the files as they were at the last `cindex-rs`. To stop
-thinking about that in a git repository:
+An index reflects the files as they were at the last `cindex-rs`. One command
+brings it up to date, and it is made to be run by something other than you:
+
+```
+cindex-rs --hook                # refresh the index that covers this directory, if anything changed
+```
+
+It prints nothing, returns at once and always exits 0, so it cannot slow down
+or break whatever ran it. It does nothing where there is no index. And it
+rebuilds only if a file has been added, removed or modified — an unchanged
+tree costs one listing and no file is opened — so it can be fired after every
+command of a version-control client. Anything that can run a command can keep
+the index fresh with it.
+
+**git** has hooks, and one command installs them:
 
 ```
 cindex-rs --install-hooks       # build the index now, and refresh it on every git event
 ```
 
 That builds the local index and installs `post-checkout`, `post-merge`,
-`post-commit` and `post-rewrite` hooks that each run
-`cindex-rs --local --if-changed --background`. So after any checkout, pull,
-commit or rebase, the index is refreshed — `--if-changed` skips the work when
-nothing moved, and `--background` returns at once so git never waits on it.
-Foreign hooks already present are left untouched; `--uninstall-hooks` removes
-only the ones csearch-rs installed.
+`post-commit` and `post-rewrite` hooks, so a checkout, pull, commit or rebase
+refreshes it — from the command line, a GUI or an IDE alike. Hooks already
+there that are not ours are left alone; `--uninstall-hooks` removes only ours.
 
-Between git events (an uncommitted edit you have not yet searched for), re-run
-`cindex-rs --local` yourself. `csearch-rs` prints a one-line note when a search
-runs against an index whose `HEAD` has moved, so a stale result set is never
-silently trusted.
+**Mercurial** has hooks too. In the repository's `.hg/hgrc` — or in `~/.hgrc`,
+to cover every repository that has an index:
+
+```ini
+[hooks]
+update.csearch-rs = cindex-rs --hook
+commit.csearch-rs = cindex-rs --hook
+```
+
+**Subversion, Perforce, Jujutsu and others run no hooks on your machine.**
+For those, wrap the command in your shell. `cindex-rs --print-hook TOOL`
+prints a function named `TOOL` that runs the real one and then
+`cindex-rs --hook`; one line in the shell's startup file switches it on:
+
+```sh
+eval "$(cindex-rs --print-hook svn --shell bash)"      # bash, zsh, ksh, sh, dash
+cindex-rs --print-hook svn --shell fish | source       # fish
+eval "`cindex-rs --print-hook svn --shell tcsh`"       # tcsh, csh
+cindex-rs --print-hook svn --shell powershell | Out-String | Invoke-Expression   # PowerShell 5 and 7
+```
+
+The wrapped command behaves as it did: same arguments, same exit status,
+pipes and redirections where you put them, nothing extra printed. Three
+things to know:
+
+- A wrapper sees only what is typed in that shell. A GUI client or an IDE
+  plugin goes round it; for those, use the scheduled job below.
+- In PowerShell the exit status is in `$LASTEXITCODE`, as always. `$?` is
+  true after any function, whatever happened inside it.
+- There is no wrapper for `cmd.exe`: neither a doskey macro nor a batch file
+  can pass a command line through unharmed. PowerShell and Git Bash both work
+  on Windows.
+
+**Anything else** — a GUI client, a sync tool, a build that generates code —
+can be covered by running the same command in the tree on a schedule, or from
+a file watcher or an editor:
+
+```
+# crontab: every five minutes. cron's PATH is short, so spell the path out.
+*/5 * * * *  cd ~/src/project && ~/bin/cindex-rs --hook
+```
+
+A burst of them is harmless: refreshes of one index take turns, and while one
+is running and another is waiting, any more simply exit.
+
+If the index does not seem to be keeping up, `cindex-rs --hook --verbose` runs
+in the foreground and says what it decided and why. Between events — an edit
+you have not committed yet — run `cindex-rs` yourself. `csearch-rs` prints a
+one-line note when it searches an index whose `HEAD` has since moved, so a
+stale result is never silently trusted.
 
 | Flag | Meaning |
 |---|---|
@@ -120,6 +176,9 @@ silently trusted.
 | `--local` | per-project index at the repository root; a repository is listed through git |
 | `--if-changed` | rebuild only if a file was added, removed or modified since the last build |
 | `--background` | do the work in a detached process and return immediately |
+| `--hook` | refresh the index that covers this directory: `--if-changed` and `--background`, silent, always exit 0, and a no-op where there is no index |
+| `--print-hook TOOL` | print a shell wrapper that runs `TOOL` and then `--hook` |
+| `--shell SHELL` | the shell to write that wrapper for (default: from `$SHELL`) |
 | `--install-hooks` | install git hooks that refresh the local index on every git event (implies `--local`) |
 | `--uninstall-hooks` | remove those hooks |
 
@@ -190,7 +249,8 @@ an error.
   damaged index is reported rather than crashing. Two `cindex-rs` runs on the
   same index take turns rather than writing over each other.
 - **A few small files sit beside the index**: `.meta` (what it was built from),
-  `.lock`, and during a build `.tmp`. `cindex-rs --reset` removes them with it.
+  `.lock` and `.queue` (how refreshes take turns), and during a build `.tmp`.
+  `cindex-rs --reset` removes them with it.
 
 ## How it works
 
@@ -444,6 +504,16 @@ index returns.** A false negative there would be invisible in normal use — the
 file simply never appears. 8,000 checks over random corpora and patterns have
 produced none. `CSEARCH_RS_PROP_ITERS=40 cargo test --test superset` runs it
 hard.
+
+`tests/hooks.rs` runs what the section on keeping the index fresh promises,
+for real: git's own hooks through a checkout, a commit and a `git clean`; the
+Mercurial recipe in a Mercurial repository; and the `--print-hook` wrapper in
+every shell it is written for, checking exit status, arguments with spaces,
+redirections, pipes in both directions, and that the index followed. CI names
+the shells each platform must have — sh, bash, dash, zsh, ksh, fish and tcsh
+on Linux; sh, bash, dash, zsh, ksh, tcsh and csh on macOS; both PowerShells
+and Git's bash on Windows — and fails if one is missing. Elsewhere a shell
+that is not installed is skipped with a message.
 
 `tests/coexist.rs` and `tests/names.rs` hold the project to not sharing a name
 with the original: the binaries, index file and variable are checked against

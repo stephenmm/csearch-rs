@@ -488,11 +488,7 @@ fn install_hooks_writes_four_hooks_and_the_initial_index() {
             csearch::names::CINDEX,
             "{name}: runs {program}"
         );
-        assert_eq!(
-            args,
-            ["--local", "--if-changed", "--background"],
-            "{name}: wrong command"
-        );
+        assert_eq!(args, ["--local", "--hook"], "{name}: wrong command");
     }
     // install-hooks implies --local, so the index exists and is searchable now.
     assert!(root.join(INDEX_FILE_NAME).is_file());

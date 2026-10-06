@@ -101,7 +101,7 @@ impl Posting {
 /// True when `child` is `parent` itself or lies somewhere beneath it. Both
 /// must be canonical path strings; the check is textual, so `C:\code-other`
 /// is correctly not inside `C:\code`.
-fn is_within(child: &str, parent: &str) -> bool {
+pub fn is_within(child: &str, parent: &str) -> bool {
     if !child.starts_with(parent) {
         return false;
     }

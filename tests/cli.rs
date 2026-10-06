@@ -661,3 +661,34 @@ fn a_git_hooks_environment_does_not_redirect_us_to_its_repository() {
         .lines()
         .any(|l| l == pattern));
 }
+
+#[test]
+fn a_double_dash_ends_the_options_and_what_follows_is_still_a_path() {
+    // `--hook --after TOOL -- ARGS` gave the words after `--` a second
+    // meaning. Everywhere else they are what they always were: paths, and
+    // the only way to name a directory that begins with a dash.
+    let dir = tempfile::tempdir().unwrap();
+    for (name, file) in [("-odd", "f.txt"), ("plain", "g.txt")] {
+        fs::create_dir_all(dir.path().join(name)).unwrap();
+        fs::write(dir.path().join(name).join(file), "needle\n").unwrap();
+    }
+    let index = dir.path().join("index");
+
+    let out = sealed(CINDEX)
+        .env(INDEX_ENV, &index)
+        .current_dir(dir.path())
+        .args(["plain", "--", "-odd"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let roots = text(&cindex(&index, &["--list"]).stdout);
+    let mut names: Vec<&str> = roots
+        .lines()
+        .map(|r| r.rsplit(['/', '\\']).next().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["-odd", "plain"], "{roots}");
+    let found = text(&csearch(&index, &["-c", "needle"]).stdout);
+    assert_eq!(found.lines().count(), 2, "{found}");
+}
