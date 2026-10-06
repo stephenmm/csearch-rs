@@ -397,8 +397,10 @@ fn local_index_is_created_excluded_and_discovered() {
         .output()
         .unwrap();
     assert_eq!(text(&status.stdout).trim(), "", "git sees the index");
+    // One pattern covers the index and its sidecars (stamp, lock, temporary).
+    let pattern = format!("{INDEX_FILE_NAME}*");
     let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
-    assert!(exclude.lines().any(|l| l == INDEX_FILE_NAME), "{exclude}");
+    assert!(exclude.lines().any(|l| l == pattern), "{exclude}");
     assert_eq!(
         fs::read_to_string(root.join(".gitignore")).unwrap(),
         "build/\n",
@@ -431,7 +433,7 @@ fn local_index_is_created_excluded_and_discovered() {
     let out = run_from(CINDEX, &root, &home, &["--local"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let exclude = fs::read_to_string(root.join(".git/info/exclude")).unwrap();
-    assert_eq!(exclude.lines().filter(|l| *l == INDEX_FILE_NAME).count(), 1);
+    assert_eq!(exclude.lines().filter(|l| *l == pattern).count(), 1);
 
     // And plain `cindex-rs` inside the repo now rebuilds the local one, not
     // home.
@@ -586,4 +588,107 @@ fn output_order_and_totals_survive_chunking() {
     let out = text(&csearch(&index, &["-c", "-h", "needle"]).stdout);
     assert_eq!(out.lines().count(), 300);
     assert!(out.lines().all(|l| l == "1"), "{out}");
+}
+
+#[test]
+fn a_git_hooks_environment_does_not_redirect_us_to_its_repository() {
+    // git tells its hooks which repository they are running for -- GIT_DIR,
+    // GIT_INDEX_FILE and more -- and every git started from a hook inherits
+    // that. A refresh started there for some *other* root would then ask
+    // about the hook's repository, whatever `-C` said.
+    if !have_git() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    // The repository whose hook is "running".
+    let hooked = dir.path().join("hooked");
+    fs::create_dir_all(&hooked).unwrap();
+    fs::write(hooked.join("h.txt"), "needle in the hooked repository\n").unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"],
+        &["commit", "-q", "-m", "h"],
+    ] {
+        assert!(common::git(&hooked, args));
+    }
+    // Another one, with a file only its own info/exclude keeps out.
+    let other = dir.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("shown.txt"), "needle shown\n").unwrap();
+    fs::write(other.join("private.txt"), "needle private\n").unwrap();
+    assert!(common::git(&other, &["init", "-q"]));
+    fs::write(other.join(".git/info/exclude"), "private.txt\n").unwrap();
+    assert!(common::git(&other, &["add", "-A"]));
+    assert!(common::git(&other, &["commit", "-q", "-m", "o"]));
+    let hooked_exclude = fs::read_to_string(hooked.join(".git/info/exclude")).unwrap_or_default();
+
+    // Everything below runs as it would under a hook of `hooked`.
+    let in_hook = |exe: &str, cwd: &Path, args: &[&str]| {
+        common::command_from(exe, cwd, &home)
+            .env("GIT_DIR", hooked.join(".git"))
+            .env("GIT_INDEX_FILE", hooked.join(".git").join("index"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // --local in `other`: the index goes there, listed by `other`'s rules,
+    // and it is `other`'s exclude file that learns about it.
+    let out = in_hook(CINDEX, &other, &["--local"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let found = text(&in_hook(CSEARCH, &other, &["-l", "needle"]).stdout);
+    let mut names: Vec<&str> = found
+        .lines()
+        .map(|l| Path::new(l).file_name().unwrap().to_str().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["shown.txt"],
+        "listed by the wrong repository's rules"
+    );
+    assert_eq!(
+        fs::read_to_string(hooked.join(".git/info/exclude")).unwrap_or_default(),
+        hooked_exclude,
+        "wrote to the hook's repository instead of the one being indexed"
+    );
+    let pattern = format!("{INDEX_FILE_NAME}*");
+    assert!(fs::read_to_string(other.join(".git/info/exclude"))
+        .unwrap()
+        .lines()
+        .any(|l| l == pattern));
+}
+
+#[test]
+fn a_double_dash_ends_the_options_and_what_follows_is_still_a_path() {
+    // `--hook --after TOOL -- ARGS` gave the words after `--` a second
+    // meaning. Everywhere else they are what they always were: paths, and
+    // the only way to name a directory that begins with a dash.
+    let dir = tempfile::tempdir().unwrap();
+    for (name, file) in [("-odd", "f.txt"), ("plain", "g.txt")] {
+        fs::create_dir_all(dir.path().join(name)).unwrap();
+        fs::write(dir.path().join(name).join(file), "needle\n").unwrap();
+    }
+    let index = dir.path().join("index");
+
+    let out = sealed(CINDEX)
+        .env(INDEX_ENV, &index)
+        .current_dir(dir.path())
+        .args(["plain", "--", "-odd"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let roots = text(&cindex(&index, &["--list"]).stdout);
+    let mut names: Vec<&str> = roots
+        .lines()
+        .map(|r| r.rsplit(['/', '\\']).next().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["-odd", "plain"], "{roots}");
+    let found = text(&csearch(&index, &["-c", "needle"]).stdout);
+    assert_eq!(found.lines().count(), 2, "{found}");
 }

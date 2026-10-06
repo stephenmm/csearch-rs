@@ -40,6 +40,14 @@ Rust-heavy corpus scores higher.
   identical whether it is checked out on Windows or Unix.
 - Commit at meaningful milestones, one logical change per commit, with the
   regression test that would have caught the bug in the same commit.
+- **A hook is a guest.** `cindex-rs --hook` prints nothing, exits 0 whatever
+  happens, returns before the work is done, and changes nothing where there
+  is no index. Anything added to that path keeps to it; `--hook --verbose` is
+  where explanations go.
+- **Tests wait for evidence, not for time.** When a test needs another process
+  to have reached some point, it waits for a line on stderr, a file, or a
+  lock -- never `sleep(1500)`. Process start-up on a busy Windows machine has
+  been seen to take five seconds.
 - `rustfmt` defaults and `clippy -D warnings`; CI enforces both on every
   platform before it runs the tests.
 
@@ -50,11 +58,15 @@ src/names.rs     every name the project installs; nothing else spells them
 src/trigram.rs   AVX2/scalar trigram packing, file validation, bitmap dedup
 src/query.rs     boolean trigram Query (And/Or/All/None) + simplification
 src/regexp.rs    regexp -> Query analysis (port of Cox's index/regexp.go)
-src/write.rs     parallel index builder + on-disk format; file listing
+src/write.rs     parallel index builder + on-disk format; planning the roots
 src/read.rs      mmap reader, delta-varint posting lists, query evaluation
 src/varint.rs    varint encode/decode
-src/paths.rs     index path resolution; pre-0.3 leftovers; repo root
-src/gitstate.rs  git-state stamp for --if-changed and the staleness note
+src/paths.rs     index path resolution; pre-0.3 leftovers; repo root; sidecars
+src/listing.rs   which files belong to a root (walk | git); tree fingerprint
+src/stamp.rs     <index>.meta: what the index was built from (--if-changed)
+src/lock.rs      one refresh of an index at a time; the hooks' queue
+src/githead.rs   HEAD read from the repository's files, without running git
+src/hook.rs      --print-hook: the wrapper for each shell
 src/bin/cindex.rs   -> cindex-rs
 src/bin/csearch.rs  -> csearch-rs
 
@@ -64,7 +76,10 @@ tests/cli.rs               drives the real binaries (roots, exit codes, pipes)
 tests/corruption.rs        every field of an index damaged in turn
 tests/superset.rs          randomised: matches are always candidates
 tests/git_listing.rs       --git: the file list comes from git
-tests/refresh.rs           --if-changed, --background, hooks, staleness
+tests/listing_source.rs    the index remembers how each root is listed
+tests/refresh.rs           --if-changed, --background, the lock, staleness
+tests/githead.rs           HEAD from files agrees with git, layout by layout
+tests/hooks.rs             --hook; git's and Mercurial's hooks; shell wrappers
 tests/names.rs             our names are ours; --help never names theirs
 tests/coexist.rs           side by side with the original, stand-in and real
 
@@ -97,9 +112,17 @@ a message when they are not installed; `go install
 github.com/google/codesearch/cmd/{cindex,csearch}@v1.2.0` provides them, and
 `CSEARCH_RS_REQUIRE_ORIGINAL=1` (set in CI) turns the skip into a failure.
 
+`tests/hooks.rs` runs the `--print-hook` wrapper in every shell it finds, and
+the Mercurial recipe if `hg` is installed. `CSEARCH_RS_REQUIRE_SHELLS` (a
+comma-separated list) and `CSEARCH_RS_REQUIRE_HG=1` do for those what the
+variable above does for the original; the CI matrix sets them per platform.
+On this Windows machine that means sh, bash and dash from Git, and Windows
+PowerShell; zsh, ksh, fish, tcsh, csh, pwsh and Mercurial are exercised only
+in CI.
+
 ## Status
 
-Complete and verified. 67 tests; CI builds and tests on Linux, Windows and
+Complete and verified. 128 tests; CI builds and tests on Linux, Windows and
 macOS, gating on rustfmt and clippy before the suite.
 
 **Correctness.** Per-file match counts are identical to the Go original on
@@ -134,6 +157,19 @@ to the original is passed over in silence. Verified against Go codesearch
 v1.2.0, which is also how it came to light that the original cannot refresh an
 index in place on Windows (a bare `cindex` leaves the old one and
 `.csearchindex~` files); the test uses `cindex -reset <path>` for that reason.
+
+**Freshness.** Since 0.4 anything that can run a command keeps an index
+fresh with `cindex-rs --hook`: git through `--install-hooks`, Mercurial
+through two lines of `hgrc`, a system with no client-side hooks through a
+shell wrapper from `--print-hook TOOL`, and anything else through a scheduler.
+Change detection is a fingerprint of the listing (path, size and modification
+time of every file), so it needs no version-control system and catches what
+the old `git status` comparison missed; the index (format 2) records how each
+root is listed, so a refresh lists it the same way; a kernel lock makes
+refreshes of one index take turns, and a burst of hooks collapses to one
+running and one waiting. A hook that cannot list a root the way the index
+records leaves the index alone instead of walking. Design:
+`docs/design/refresh-from-any-vcs.md`.
 
 **Distribution.** BSD-3-Clause, matching upstream, with the derivation recorded
 in NOTICE. `build_standalone.py` produces a static-CRT Windows binary (no VC++

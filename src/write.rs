@@ -1,6 +1,6 @@
 //! Parallel index construction.
 //!
-//! Files are discovered sequentially (sorted, so file ids are in path order),
+//! Files are listed sequentially (sorted, so file ids are in path order),
 //! then processed in batches: each batch is trigram-analyzed in parallel with
 //! rayon, then appended in file-id order to per-trigram delta-varint posting
 //! lists through a dense trigram->slot table (no hashing, no global sort).
@@ -9,18 +9,22 @@
 //! On-disk layout (all integers little-endian):
 //!
 //! ```text
-//! magic          "csearch-rs index 1\n"
-//! paths          root paths, each NUL-terminated, then an extra NUL
+//! magic          "csearch-rs index 2\n"
+//! roots          per root: path, NUL, listing source, NUL; then an extra NUL
 //! names          file names, each NUL-terminated (sorted)
 //! name index     u32 offset (relative to `names`) per file
 //! postings       per trigram: varint first id, then varint deltas
 //! posting index  per trigram: u32 trigram, u32 count, u64 offset (16 B)
 //! trailer        5 × u64 section offsets, u32 nfiles, u32 ntrigrams,
-//!                "CSRSIDX1"
+//!                "CSRSIDX2"
 //! ```
+//!
+//! Format 1 had no listing source: a root was a bare path, and whether it was
+//! walked or taken from git depended on the flags of whichever run came next.
 
+use crate::listing::{snapshot, ListOptions, Root, Snapshot, Source};
 use crate::names::CINDEX;
-use crate::paths::{canonical_string, strip_verbatim};
+use crate::paths::{canonical_string, sidecar, strip_verbatim};
 use crate::trigram::{self, MAX_FILE_LEN};
 use crate::varint;
 use anyhow::{bail, Context, Result};
@@ -28,16 +32,14 @@ use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
-use walkdir::WalkDir;
 
-pub const MAGIC: &[u8] = b"csearch-rs index 1\n";
+pub const MAGIC: &[u8] = b"csearch-rs index 2\n";
 /// Every format version starts with this; only the current one matches
 /// `MAGIC` in full. It is also what tells an index of ours from one written
 /// by the original csearch, whose magic is `csearch index`.
 pub const MAGIC_FAMILY: &[u8] = b"csearch-rs index ";
-pub const TRAILER_MAGIC: &[u8; 8] = b"CSRSIDX1";
+pub const TRAILER_MAGIC: &[u8; 8] = b"CSRSIDX2";
 pub const TRAILER_LEN: usize = 5 * 8 + 4 + 4 + 8;
 pub const POST_ENTRY_LEN: usize = 16;
 
@@ -48,9 +50,8 @@ pub struct BuildOptions {
     pub batch_bytes: u64,
     /// Files larger than this are skipped, and counted as skipped.
     pub max_file_bytes: u64,
-    /// Take the file list from `git ls-files` for roots inside a work tree,
-    /// so ignored files are never indexed. Roots outside a repository, or a
-    /// machine without git, fall back to walking.
+    /// For [`build_index`] only: list every root through git rather than by
+    /// walking. (An index built through [`plan_roots`] has a source per root.)
     pub git: bool,
 }
 
@@ -97,14 +98,10 @@ impl Posting {
     }
 }
 
-fn skip_name(name: &str) -> bool {
-    name.starts_with('.') || name.starts_with('#') || name.starts_with('~') || name.ends_with('~')
-}
-
 /// True when `child` is `parent` itself or lies somewhere beneath it. Both
 /// must be canonical path strings; the check is textual, so `C:\code-other`
 /// is correctly not inside `C:\code`.
-fn is_within(child: &str, parent: &str) -> bool {
+pub fn is_within(child: &str, parent: &str) -> bool {
     if !child.starts_with(parent) {
         return false;
     }
@@ -117,15 +114,16 @@ fn is_within(child: &str, parent: &str) -> bool {
 
 /// Sort and dedup roots, dropping any that lie inside another so that no
 /// file is ever indexed (and reported) twice. Returns the kept roots and,
-/// for each dropped one, the root that already covers it.
-pub fn collapse_roots(mut roots: Vec<String>) -> (Vec<String>, Vec<(String, String)>) {
-    roots.sort();
-    roots.dedup();
-    let mut kept: Vec<String> = Vec::new();
+/// for each dropped one, the root that already covers it -- whose listing
+/// source is the one that then applies to those files.
+pub fn collapse_roots(mut roots: Vec<Root>) -> (Vec<Root>, Vec<(String, String)>) {
+    roots.sort_by(|a, b| a.path.cmp(&b.path));
+    roots.dedup_by(|b, a| a.path == b.path);
+    let mut kept: Vec<Root> = Vec::new();
     let mut dropped = Vec::new();
     for r in roots {
-        match kept.iter().find(|k| is_within(&r, k)) {
-            Some(k) => dropped.push((r, k.clone())),
+        match kept.iter().find(|k| is_within(&r.path, &k.path)) {
+            Some(k) => dropped.push((r.path, k.path.clone())),
             None => kept.push(r),
         }
     }
@@ -144,236 +142,161 @@ fn same_root(a: &str, b: &str) -> bool {
     }
 }
 
+/// What a run of the indexer was asked to do to the set of roots.
+#[derive(Debug, Default)]
+pub struct Request<'a> {
+    /// The roots the index holds now.
+    pub stored: &'a [Root],
+    /// Directories named on the command line.
+    pub add: &'a [PathBuf],
+    /// The root `--local` found, if it was given: the enclosing repository,
+    /// or the working directory.
+    pub local: Option<&'a Path>,
+    /// Roots to drop.
+    pub remove: &'a [PathBuf],
+    /// `--git` or `--walk`, if either was given.
+    pub listing: Option<Source>,
+}
+
 /// The roots the next build should cover, plus notes for the user.
 #[derive(Debug, Default)]
 pub struct RootPlan {
-    pub roots: Vec<PathBuf>,
+    pub roots: Vec<Root>,
     pub notes: Vec<String>,
 }
 
-/// Work out the root set for a rebuild: the stored roots, minus `remove`,
-/// minus any that no longer exist (noted, not fatal, so one deleted
-/// directory cannot wedge the index), plus `add`. Roots named explicitly in
-/// `add` must exist.
-pub fn resolve_roots(stored: &[String], add: &[PathBuf], remove: &[PathBuf]) -> Result<RootPlan> {
-    let mut plan = RootPlan::default();
-    for p in add {
+/// Work out the root set for a rebuild, and how each root is to be listed.
+///
+/// The set is the stored roots, minus `remove`, minus any that no longer
+/// exist (noted, not fatal, so one deleted directory cannot wedge the index),
+/// plus the named ones, which must exist. Roots inside other roots collapse
+/// into them.
+///
+/// A root's listing source is remembered, so the question is only when it
+/// changes:
+///
+/// - a listing flag applies to the roots named in this run -- or, when none
+///   is named, to every root;
+/// - otherwise a root keeps the source it has;
+/// - a root seen for the first time is walked, except that `--local` lists a
+///   git repository through git.
+pub fn plan_roots(req: &Request) -> Result<RootPlan> {
+    let mut notes = Vec::new();
+    let named: Vec<&Path> = req
+        .add
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(req.local)
+        .collect();
+    for p in &named {
         if !p.is_dir() {
             bail!("{}: not a directory", p.display());
         }
     }
     // A root being removed may itself have vanished, in which case it cannot
     // be canonicalised; fall back to the string as typed.
-    let removed: Vec<String> = remove
+    let removed: Vec<String> = req
+        .remove
         .iter()
         .map(|p| canonical_string(p).unwrap_or_else(|_| strip_verbatim(&p.to_string_lossy())))
         .collect();
     for r in &removed {
-        if !stored.iter().any(|s| same_root(s, r)) {
-            plan.notes.push(format!("{r}: not in the index"));
+        if !req.stored.iter().any(|s| same_root(&s.path, r)) {
+            notes.push(format!("{r}: not in the index"));
         }
     }
-    plan.roots.extend(add.iter().cloned());
-    for s in stored {
-        if removed.iter().any(|r| same_root(s, r)) {
-            plan.notes.push(format!("{s}: removed"));
-        } else if !Path::new(s).is_dir() {
-            plan.notes
-                .push(format!("{s}: no longer exists, dropped from the index"));
+
+    let mut wanted: Vec<Root> = Vec::new();
+    for s in req.stored {
+        if removed.iter().any(|r| same_root(&s.path, r)) {
+            notes.push(format!("{}: removed", s.path));
+        } else if !Path::new(&s.path).is_dir() {
+            notes.push(format!(
+                "{}: no longer exists, dropped from the index",
+                s.path
+            ));
         } else {
-            plan.roots.push(PathBuf::from(s));
-        }
-    }
-    Ok(plan)
-}
-
-/// Collect regular files under `roots` in sorted order with their sizes,
-/// plus the number of files skipped for being over `max_file_bytes`.
-fn walk(roots: &[String], max_file_bytes: u64) -> (Vec<(PathBuf, u64)>, usize) {
-    let mut files = Vec::new();
-    let mut too_large = 0usize;
-    for root in roots {
-        let it = WalkDir::new(root)
-            .follow_links(false)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_entry(|e| e.depth() == 0 || !e.file_name().to_str().is_some_and(skip_name));
-        for entry in it {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(err) => {
-                    // A directory we cannot enter is worth a line even without
-                    // --verbose; the user would otherwise never know.
-                    eprintln!("{CINDEX}: {err}");
-                    continue;
-                }
+            let source = match req.listing {
+                Some(flag) if named.is_empty() => flag,
+                _ => s.source,
             };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if len > max_file_bytes {
-                eprintln!(
-                    "{CINDEX}: {}: {len} bytes is over the {max_file_bytes}-byte limit, skipping",
-                    entry.path().display()
-                );
-                too_large += 1;
-                continue;
-            }
-            files.push((entry.into_path(), len));
-        }
-    }
-    (files, too_large)
-}
-
-/// Outcome of asking git for the file list under a root.
-enum GitList {
-    /// The work-tree files: tracked, plus untracked but not ignored.
-    Files(Vec<PathBuf>),
-    /// `root` is simply not inside a git repository -- expected, walk quietly.
-    NotARepo,
-    /// git could not list the files for some other reason (not installed, or
-    /// an error such as "dubious ownership" on a filesystem without ownership,
-    /// common on exFAT). Carries git's own message so the caller can show it,
-    /// because silently walking would index files the user asked git to skip.
-    Unavailable(String),
-}
-
-/// What git considers part of the work tree under `root`: tracked files plus
-/// untracked-but-not-ignored ones -- what a developer means by "the repo".
-fn git_files(root: &str) -> GitList {
-    let out = match Command::new("git")
-        .args([
-            "-C",
-            root,
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return GitList::Unavailable("git could not be run".into()),
-    };
-    if !out.status.success() {
-        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        // git reports both "not a repository" and real errors as exit 128;
-        // only the former is the routine "this root isn't a repo" case.
-        if msg.contains("not a git repository") {
-            return GitList::NotARepo;
-        }
-        return GitList::Unavailable(msg);
-    }
-    let mut files = Vec::new();
-    for rel in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
-        let rel = String::from_utf8_lossy(rel);
-        // git always prints '/'; rebuild with the platform separator so the
-        // stored names look the same as walked ones do.
-        let mut path = PathBuf::from(root);
-        path.extend(rel.split('/'));
-        files.push(path);
-    }
-    GitList::Files(files)
-}
-
-/// The files to index under `roots`: git's list when asked for and
-/// available, otherwise a directory walk. Returns (path, size) pairs and the
-/// number skipped for being over the size limit.
-fn collect_files(roots: &[String], opts: &BuildOptions) -> (Vec<(PathBuf, u64)>, usize) {
-    if !opts.git {
-        return walk(roots, opts.max_file_bytes);
-    }
-    let mut files = Vec::new();
-    let mut too_large = 0usize;
-    for root in roots {
-        let listed = match git_files(root) {
-            GitList::Files(f) => f,
-            GitList::NotARepo => {
-                eprintln!("{CINDEX}: {root}: not a git work tree, walking the directory instead");
-                let (walked, n) = walk(std::slice::from_ref(root), opts.max_file_bytes);
-                files.extend(walked);
-                too_large += n;
-                continue;
-            }
-            GitList::Unavailable(msg) => {
-                // Show git's own words: silently walking would index the very
-                // files --git was meant to exclude, so the user should see why.
-                eprintln!("{CINDEX}: {root}: could not use git, walking the directory instead");
-                for line in msg.lines() {
-                    eprintln!("{CINDEX}:   {line}");
-                }
-                let (walked, n) = walk(std::slice::from_ref(root), opts.max_file_bytes);
-                files.extend(walked);
-                too_large += n;
-                continue;
-            }
-        };
-        for path in listed {
-            // The same name rules as the walk, applied to every component
-            // below the root, so `.github/` and editor droppings are treated
-            // exactly as they are without --git (and as ripgrep treats them).
-            let hidden = path.strip_prefix(root).is_ok_and(|rel| {
-                rel.components()
-                    .any(|c| c.as_os_str().to_str().is_some_and(skip_name))
+            wanted.push(Root {
+                path: canonical_string(Path::new(&s.path)).unwrap_or_else(|_| s.path.clone()),
+                source,
             });
-            if hidden {
-                continue;
-            }
-            // git may list a file deleted since the last commit, a symlink,
-            // or a submodule / nested-repository directory; only regular files
-            // are indexed, as with walking.
-            let Ok(meta) = fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if !meta.is_file() {
-                continue;
-            }
-            let len = meta.len();
-            if len > opts.max_file_bytes {
-                eprintln!(
-                    "{CINDEX}: {}: {len} bytes is over the {}-byte limit, skipping",
-                    path.display(),
-                    opts.max_file_bytes
-                );
-                too_large += 1;
-                continue;
-            }
-            files.push((path, len));
         }
     }
-    // git lists in index order; sort so file ids are deterministic and
-    // path-ordered, as they are when walking.
-    files.sort();
-    (files, too_large)
+    let resolve =
+        |p: &Path| canonical_string(p).with_context(|| format!("resolving {}", p.display()));
+    let local = req.local.map(resolve).transpose()?;
+    for p in &named {
+        let path = resolve(p)?;
+        let known = wanted.iter().position(|w| same_root(&w.path, &path));
+        // Compared as resolved paths: `--local .` names the local root twice,
+        // once as typed and once as found.
+        let is_local = local.as_deref().is_some_and(|l| same_root(l, &path));
+        let source = match (req.listing, known) {
+            (Some(flag), _) => flag,
+            (None, Some(i)) => wanted[i].source,
+            (None, None) if is_local && Path::new(&path).join(".git").exists() => Source::Git,
+            (None, None) => Source::Walk,
+        };
+        match known {
+            Some(i) => wanted[i].source = source,
+            None => wanted.push(Root { path, source }),
+        }
+    }
+
+    let (roots, dropped) = collapse_roots(wanted);
+    for (child, parent) in dropped {
+        notes.push(format!("{child} is inside {parent}, not indexing it twice"));
+    }
+    Ok(RootPlan { roots, notes })
 }
 
-/// Build a fresh index of `roots` at `out`.
+/// Build a fresh index of `roots` at `out`, every root listed the same way:
+/// through git if `opts.git`, else by walking.
+///
+/// This is the library's one-call entry point. The indexer itself goes
+/// through [`plan_roots`] and [`build_from`], so that each root keeps the
+/// source recorded for it.
 pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result<Stats> {
     let t0 = Instant::now();
-    let mut root_strs: Vec<String> = Vec::new();
-    for r in roots {
-        root_strs.push(canonical_string(r).with_context(|| format!("resolving {}", r.display()))?);
-    }
-    let (root_strs, dropped) = collapse_roots(root_strs);
-    for (child, parent) in &dropped {
-        eprintln!("{CINDEX}: {child} is inside {parent}, not indexing it twice");
-    }
-
-    let (files, too_large) = collect_files(&root_strs, opts);
-    let mut stats = Stats {
-        files_seen: files.len() + too_large,
-        files_skipped: too_large,
+    let source = if opts.git { Source::Git } else { Source::Walk };
+    let plan = plan_roots(&Request {
+        add: roots,
+        listing: Some(source),
         ..Default::default()
-    };
+    })?;
+    for note in &plan.notes {
+        eprintln!("{CINDEX}: {note}");
+    }
+    let snap = snapshot(
+        &plan.roots,
+        &ListOptions {
+            max_file_bytes: opts.max_file_bytes,
+            strict: false,
+        },
+    )?;
     if opts.verbose {
         eprintln!(
             "{CINDEX}: {} files found in {:.2?}",
-            files.len(),
+            snap.files.len(),
             t0.elapsed()
         );
     }
+    build_from(&snap, out, opts)
+}
+
+/// Build a fresh index at `out` from the files `snap` lists.
+pub fn build_from(snap: &Snapshot, out: &Path, opts: &BuildOptions) -> Result<Stats> {
+    let t0 = Instant::now();
+    let files = &snap.files;
+    let mut stats = Stats {
+        files_seen: files.len() + snap.too_large,
+        files_skipped: snap.too_large,
+        ..Default::default()
+    };
 
     let mut names: Vec<String> = Vec::with_capacity(files.len());
     // Dense trigram -> posting slot map replaces a hash lookup per posting;
@@ -390,15 +313,16 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
         // Cut a batch.
         let mut end = start;
         let mut bytes = 0u64;
-        while end < files.len() && (end == start || bytes + files[end].1 <= opts.batch_bytes) {
-            bytes += files[end].1;
+        while end < files.len() && (end == start || bytes + files[end].len <= opts.batch_bytes) {
+            bytes += files[end].len;
             end += 1;
         }
         let batch = &files[start..end];
 
         let analyzed: Vec<Option<(String, Vec<u32>, u64)>> = batch
             .par_iter()
-            .map(|(path, _)| {
+            .map(|file| {
+                let path = &file.path;
                 let data = match fs::read(path) {
                     Ok(d) => d,
                     Err(err) => {
@@ -468,13 +392,13 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
     // Write.
     postings.par_sort_unstable_by_key(|p| p.trigram);
 
-    let tmp = out.with_extension("tmp");
+    let tmp = sidecar(out, "tmp");
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).ok();
         }
     }
-    let off = match write_index_file(&tmp, &root_strs, &names, &postings) {
+    let off = match write_index_file(&tmp, &snap.roots, &names, &postings) {
         Ok(off) => off,
         Err(e) => {
             let _ = fs::remove_file(&tmp);
@@ -503,7 +427,7 @@ pub fn build_index(roots: &[PathBuf], out: &Path, opts: &BuildOptions) -> Result
 /// Write the whole index to `tmp`; returns its size in bytes.
 fn write_index_file(
     tmp: &Path,
-    root_strs: &[String],
+    roots: &[Root],
     names: &[String],
     postings: &[Posting],
 ) -> Result<u64> {
@@ -515,10 +439,13 @@ fn write_index_file(
     off += MAGIC.len() as u64;
 
     let paths_off = off;
-    for r in root_strs {
-        w.write_all(r.as_bytes())?;
+    for r in roots {
+        let source = r.source.tag();
+        w.write_all(r.path.as_bytes())?;
         w.write_all(&[0])?;
-        off += r.len() as u64 + 1;
+        w.write_all(source.as_bytes())?;
+        w.write_all(&[0])?;
+        off += (r.path.len() + 1 + source.len() + 1) as u64;
     }
     w.write_all(&[0])?;
     off += 1;
@@ -576,7 +503,7 @@ fn replace_file(tmp: &Path, out: &Path) -> Result<()> {
         // can be renamed. Park the old index aside, install the new one, then
         // delete the parked copy -- or leave it for next time if a reader
         // still holds it.
-        let old = out.with_extension("old");
+        let old = sidecar(out, "old");
         let _ = fs::remove_file(&old);
         let had_old = out.is_file();
         if had_old {
@@ -607,8 +534,26 @@ fn replace_file(tmp: &Path, out: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn root(path: &str, source: Source) -> Root {
+        Root {
+            path: path.into(),
+            source,
+        }
+    }
+
+    /// The planned roots as (final path component, source).
+    fn summary(plan: &RootPlan) -> Vec<(String, Source)> {
+        plan.roots
+            .iter()
+            .map(|r| {
+                let name = Path::new(&r.path).file_name().unwrap();
+                (name.to_string_lossy().into_owned(), r.source)
+            })
+            .collect()
+    }
+
     #[test]
-    fn resolve_roots_tolerates_vanished_and_removes() {
+    fn plan_tolerates_vanished_roots_and_removes() {
         let dir = tempfile::tempdir().unwrap();
         let keep = dir.path().join("keep");
         let add = dir.path().join("add");
@@ -616,16 +561,20 @@ mod tests {
         fs::create_dir(&keep).unwrap();
         fs::create_dir(&add).unwrap();
         let stored = vec![
-            canonical_string(&keep).unwrap(),
-            strip_verbatim(&gone.to_string_lossy()), // was indexed, then deleted
+            root(&canonical_string(&keep).unwrap(), Source::Walk),
+            // was indexed, then deleted
+            root(&strip_verbatim(&gone.to_string_lossy()), Source::Walk),
         ];
 
-        let plan = resolve_roots(&stored, std::slice::from_ref(&add), &[]).unwrap();
-        let ends = |s: &str| plan.roots.iter().any(|r| r.to_string_lossy().ends_with(s));
-        assert!(
-            ends("add") && ends("keep") && !ends("gone"),
-            "{:?}",
-            plan.roots
+        let plan = plan_roots(&Request {
+            stored: &stored,
+            add: std::slice::from_ref(&add),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            summary(&plan),
+            [("add".into(), Source::Walk), ("keep".into(), Source::Walk)]
         );
         assert!(
             plan.notes
@@ -635,7 +584,12 @@ mod tests {
             plan.notes
         );
 
-        let plan = resolve_roots(&stored, &[], std::slice::from_ref(&keep)).unwrap();
+        let plan = plan_roots(&Request {
+            stored: &stored,
+            remove: std::slice::from_ref(&keep),
+            ..Default::default()
+        })
+        .unwrap();
         assert!(plan.roots.is_empty(), "{:?}", plan.roots);
         assert!(
             plan.notes.iter().any(|n| n.ends_with(": removed")),
@@ -644,7 +598,12 @@ mod tests {
         );
 
         // Removing something never indexed is noted, not fatal.
-        let plan = resolve_roots(&stored, &[], std::slice::from_ref(&add)).unwrap();
+        let plan = plan_roots(&Request {
+            stored: &stored,
+            remove: std::slice::from_ref(&add),
+            ..Default::default()
+        })
+        .unwrap();
         assert!(
             plan.notes.iter().any(|n| n.contains("not in the index")),
             "{:?}",
@@ -652,7 +611,90 @@ mod tests {
         );
 
         // Paths named on the command line must exist.
-        assert!(resolve_roots(&stored, std::slice::from_ref(&gone), &[]).is_err());
+        assert!(plan_roots(&Request {
+            stored: &stored,
+            add: std::slice::from_ref(&gone),
+            ..Default::default()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn a_root_keeps_its_source_until_a_flag_says_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |name: &str| {
+            let d = dir.path().join(name);
+            fs::create_dir(&d).unwrap();
+            d
+        };
+        let (a, b, new) = (mk("a"), mk("b"), mk("new"));
+        let stored = vec![
+            root(&canonical_string(&a).unwrap(), Source::Git),
+            root(&canonical_string(&b).unwrap(), Source::Walk),
+        ];
+        let plan = |add: &[PathBuf], listing: Option<Source>| {
+            summary(
+                &plan_roots(&Request {
+                    stored: &stored,
+                    add,
+                    listing,
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+        };
+        let (git, walk) = (Source::Git, Source::Walk);
+        let names = |a, b| vec![("a".to_string(), a), ("b".to_string(), b)];
+
+        // A plain re-index changes nothing.
+        assert_eq!(plan(&[], None), names(git, walk));
+        // A flag on its own applies to every root.
+        assert_eq!(plan(&[], Some(walk)), names(walk, walk));
+        assert_eq!(plan(&[], Some(git)), names(git, git));
+        // A flag with a path applies to that path only.
+        assert_eq!(plan(std::slice::from_ref(&b), Some(git)), names(git, git));
+        assert_eq!(
+            plan(std::slice::from_ref(&a), Some(walk)),
+            names(walk, walk)
+        );
+        // Naming a root without a flag leaves its source alone.
+        assert_eq!(plan(std::slice::from_ref(&a), None), names(git, walk));
+        // A new root is walked unless told otherwise, and the others stay put.
+        let mut with_new = names(git, walk);
+        with_new.push(("new".into(), walk));
+        assert_eq!(plan(std::slice::from_ref(&new), None), with_new);
+        with_new[2].1 = git;
+        assert_eq!(plan(std::slice::from_ref(&new), Some(git)), with_new);
+    }
+
+    #[test]
+    fn local_lists_a_repository_through_git_and_anything_else_by_walking() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let plain = dir.path().join("plain");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(&plain).unwrap();
+        let local = |root: &Path, stored: &[Root], listing| {
+            summary(
+                &plan_roots(&Request {
+                    stored,
+                    local: Some(root),
+                    listing,
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+        };
+        assert_eq!(local(&repo, &[], None), [("repo".into(), Source::Git)]);
+        assert_eq!(local(&plain, &[], None), [("plain".into(), Source::Walk)]);
+        // --walk overrides the default for a repository...
+        assert_eq!(
+            local(&repo, &[], Some(Source::Walk)),
+            [("repo".into(), Source::Walk)]
+        );
+        // ...and from then on --local keeps what is stored.
+        let walked = [root(&canonical_string(&repo).unwrap(), Source::Walk)];
+        assert_eq!(local(&repo, &walked, None), [("repo".into(), Source::Walk)]);
     }
 
     #[test]
@@ -674,7 +716,7 @@ mod tests {
         assert!(held.name(0).ends_with("a.txt"));
         let fresh = crate::read::Index::open(&out).unwrap();
         assert_eq!(fresh.num_files(), 2);
-        assert!(!out.with_extension("tmp").exists(), "tmp file left behind");
+        assert!(!sidecar(&out, "tmp").exists(), "tmp file left behind");
     }
 
     #[test]
@@ -687,7 +729,7 @@ mod tests {
         let out = dir.path().join("index");
         fs::create_dir(&out).unwrap();
         assert!(build_index(&[root], &out, &BuildOptions::default()).is_err());
-        assert!(!out.with_extension("tmp").exists(), "tmp file left behind");
+        assert!(!sidecar(&out, "tmp").exists(), "tmp file left behind");
         assert!(out.is_dir(), "the directory in the way must be untouched");
     }
 
@@ -725,13 +767,22 @@ mod tests {
     #[test]
     fn collapse_drops_nested_roots() {
         let (kept, dropped) = collapse_roots(vec![
-            "/a/b/c".into(),
-            "/a/b".into(),
-            "/a/bc".into(),
-            "/a/b".into(),
-            "/x".into(),
+            root("/a/b/c", Source::Git),
+            root("/a/b", Source::Walk),
+            root("/a/bc", Source::Walk),
+            root("/a/b", Source::Walk),
+            root("/x", Source::Git),
         ]);
-        assert_eq!(kept, vec!["/a/b", "/a/bc", "/x"]);
+        // The nested root goes, and with it its own source: the files under
+        // it are listed the way the root that covers them is.
+        assert_eq!(
+            kept,
+            [
+                root("/a/b", Source::Walk),
+                root("/a/bc", Source::Walk),
+                root("/x", Source::Git)
+            ]
+        );
         assert_eq!(dropped, vec![("/a/b/c".to_string(), "/a/b".to_string())]);
     }
 

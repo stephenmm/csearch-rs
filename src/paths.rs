@@ -1,7 +1,7 @@
 //! Index-file location and path normalisation helpers.
 
 use crate::names::{original, CINDEX, INDEX_ENV};
-use crate::write::MAGIC_FAMILY;
+use crate::write::{MAGIC, MAGIC_FAMILY};
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -53,6 +53,16 @@ pub fn resolve_index_path(
         .join(INDEX_FILE_NAME)
 }
 
+/// A file that lives beside the index and belongs to it: `<index>.<suffix>`.
+/// The suffix is appended to the whole name rather than replacing an
+/// extension, so `a.one` and `a.two` in one directory never share a sidecar.
+pub fn sidecar(index: &Path, suffix: &str) -> PathBuf {
+    let mut name = index.as_os_str().to_owned();
+    name.push(".");
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 /// The nearest `.csearch-rs-index` file at or above `start`. A directory of
 /// that name does not count.
 pub fn find_local_index(start: &Path) -> Option<PathBuf> {
@@ -71,6 +81,18 @@ pub fn is_csearch_rs_index(path: &Path) -> bool {
         .and_then(|mut f| f.read_exact(&mut head))
         .is_ok()
         && head == *MAGIC_FAMILY
+}
+
+/// True when `path` is a csearch-rs index in some other format than the one
+/// this version reads and writes: this project's magic, another version
+/// number. A file that is merely damaged, or not ours at all, is not.
+pub fn is_other_format_version(path: &Path) -> bool {
+    let mut head = [0u8; MAGIC.len()];
+    File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && head.starts_with(MAGIC_FAMILY)
+        && head != *MAGIC
 }
 
 /// An index csearch-rs left under the original's name before 0.3: the nearest
@@ -286,6 +308,26 @@ mod tests {
         assert_eq!(
             find_legacy_index(Some(&outside), Some(&home)),
             Some(at_home)
+        );
+    }
+
+    #[test]
+    fn sidecars_append_to_the_whole_name() {
+        // Replacing the extension instead would hand `a.one` and `a.two` the
+        // same temporary file, and two builds would write it at once.
+        let dir = Path::new("d");
+        assert_eq!(
+            sidecar(&dir.join(INDEX_FILE_NAME), "tmp"),
+            dir.join(format!("{INDEX_FILE_NAME}.tmp"))
+        );
+        assert_eq!(sidecar(&dir.join("a.one"), "tmp"), dir.join("a.one.tmp"));
+        assert_ne!(
+            sidecar(&dir.join("a.one"), "tmp"),
+            sidecar(&dir.join("a.two"), "tmp")
+        );
+        assert_ne!(
+            sidecar(&dir.join("a.one"), "lock"),
+            sidecar(&dir.join("a.one"), "tmp")
         );
     }
 

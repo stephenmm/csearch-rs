@@ -1,0 +1,494 @@
+//! Which files belong to a root, and whether any of them has changed.
+//!
+//! Each root is *listed* from a source: a directory walk, or what git
+//! considers part of the work tree. The index records the source of every
+//! root, so that a refresh lists a root the way the index was built. Without
+//! that, an index made from `git ls-files` would be rebuilt by walking, and
+//! every ignored file would arrive in it.
+//!
+//! A listing, with each file's size and modification time, is a [`Snapshot`].
+//! Its fingerprint is what `--if-changed` compares, so no version-control
+//! system has to be asked whether anything changed -- which is what lets a
+//! hook from any of them, or from none, refresh an index cheaply.
+
+use crate::names::CINDEX;
+use anyhow::{bail, Result};
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+use walkdir::WalkDir;
+
+/// How the files under a root are found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// Every regular file under the directory, apart from names beginning
+    /// `.`, `#` or `~`, or ending `~`.
+    Walk,
+    /// What git considers part of the work tree: tracked files, plus
+    /// untracked ones that are not ignored.
+    Git,
+}
+
+impl Source {
+    pub const ALL: [Source; 2] = [Source::Walk, Source::Git];
+
+    /// The name stored in the index and shown by `--list --verbose`.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Source::Walk => "walk",
+            Source::Git => "git",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Source> {
+        Self::ALL.into_iter().find(|s| s.tag() == tag)
+    }
+}
+
+/// A root directory, as a canonical path string, and how it is listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Root {
+    pub path: String,
+    pub source: Source,
+}
+
+/// One file to index.
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub path: PathBuf,
+    pub len: u64,
+    /// `None` only where the platform cannot say.
+    pub mtime: Option<SystemTime>,
+}
+
+/// The files under a set of roots at one moment.
+#[derive(Debug)]
+pub struct Snapshot {
+    pub roots: Vec<Root>,
+    /// In path order within each root, roots in order, so file ids are
+    /// deterministic and search output comes out sorted.
+    pub files: Vec<FileEntry>,
+    /// Files left out for being over the size limit.
+    pub too_large: usize,
+    /// When the listing began -- before any file was looked at, so nothing
+    /// written from here on can carry an older timestamp.
+    pub taken_at: SystemTime,
+    /// A hash of the roots, their sources, and every file's path, size and
+    /// modification time. Two snapshots with the same fingerprint list the
+    /// same files in the same state, as far as the file system can say.
+    pub fingerprint: u64,
+    /// The newest modification time among the files of any root whose
+    /// timestamps are all whole seconds. Such a root is on a file system too
+    /// coarse to tell two quick writes apart; see `stamp::compare`.
+    pub newest_coarse_mtime: Option<SystemTime>,
+}
+
+/// How to list.
+#[derive(Debug, Clone, Copy)]
+pub struct ListOptions {
+    /// Files larger than this are left out, and counted.
+    pub max_file_bytes: u64,
+    /// When a version-control listing cannot be had, fail instead of walking.
+    /// An unattended refresh sets this: walking would replace the index with
+    /// a different set of files, and the next run would swap them back.
+    pub strict: bool,
+}
+
+/// Variables through which git tells a hook, and anything the hook starts,
+/// which repository it is running for. This is git's own list of them
+/// (`git rev-parse --local-env-vars`), less the ones that carry configuration
+/// rather than a location.
+const GIT_REPOSITORY_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// A `git` command that will look at the repository it is pointed at with
+/// `-C`, and at no other.
+///
+/// A refresh is often started from a git hook, and a hook's environment
+/// names the repository the hook belongs to. Inherited, that overrides `-C`:
+/// asked about some other root, git would answer for the hook's repository
+/// -- its index, its `info/exclude` -- and the wrong files would be listed,
+/// or the wrong repository's exclude file written to.
+pub fn git() -> Command {
+    let mut cmd = Command::new("git");
+    for var in GIT_REPOSITORY_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
+fn skip_name(name: &str) -> bool {
+    name.starts_with('.') || name.starts_with('#') || name.starts_with('~') || name.ends_with('~')
+}
+
+/// FNV-1a: a cheap, dependency-free change fingerprint. A collision would at
+/// worst skip one needed rebuild, which the next change corrects.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Fnv {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// Seconds and nanoseconds since the epoch, or `None` for a time before it
+/// (or no time at all).
+fn epoch_parts(t: Option<SystemTime>) -> Option<(u64, u32)> {
+    let d = t?.duration_since(UNIX_EPOCH).ok()?;
+    Some((d.as_secs(), d.subsec_nanos()))
+}
+
+fn fingerprint(roots: &[Root], files: &[FileEntry]) -> u64 {
+    let mut h = Fnv::new();
+    for r in roots {
+        h.write(r.path.as_bytes());
+        h.write(&[0]);
+        h.write(r.source.tag().as_bytes());
+        h.write(&[0]);
+    }
+    h.write(&[0xff]); // roots end here; a path can never start with this byte pair
+    for f in files {
+        h.write(f.path.as_os_str().as_encoded_bytes());
+        h.write(&[0]);
+        h.write(&f.len.to_le_bytes());
+        match epoch_parts(f.mtime) {
+            Some((secs, nanos)) => {
+                h.write(&secs.to_le_bytes());
+                h.write(&nanos.to_le_bytes());
+            }
+            None => h.write(&[0xfe]),
+        }
+    }
+    h.0
+}
+
+/// Every regular file under `root`, in path order, appended to `files`.
+fn walk(root: &str, opts: &ListOptions, files: &mut Vec<FileEntry>, too_large: &mut usize) {
+    let it = WalkDir::new(root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_str().is_some_and(skip_name));
+    for entry in it {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                // A directory we cannot enter is worth a line even without
+                // --verbose; the user would otherwise never know.
+                eprintln!("{CINDEX}: {err}");
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        let len = meta.as_ref().map_or(0, fs::Metadata::len);
+        if len > opts.max_file_bytes {
+            eprintln!(
+                "{CINDEX}: {}: {len} bytes is over the {}-byte limit, skipping",
+                entry.path().display(),
+                opts.max_file_bytes
+            );
+            *too_large += 1;
+            continue;
+        }
+        let mtime = meta.and_then(|m| m.modified().ok());
+        files.push(FileEntry {
+            path: entry.into_path(),
+            len,
+            mtime,
+        });
+    }
+}
+
+/// Outcome of asking git for the file list under a root.
+enum GitList {
+    /// The work-tree files: tracked, plus untracked but not ignored.
+    Files(Vec<PathBuf>),
+    /// `root` is simply not inside a git repository -- expected, walk quietly.
+    NotARepo,
+    /// git could not list the files for some other reason (not installed, or
+    /// an error such as "dubious ownership" on a filesystem without ownership,
+    /// common on exFAT). Carries git's own message so the caller can show it,
+    /// because silently walking would index files the user asked git to skip.
+    Unavailable(String),
+}
+
+/// What git considers part of the work tree under `root`: tracked files plus
+/// untracked-but-not-ignored ones -- what a developer means by "the repo".
+fn git_files(root: &str) -> GitList {
+    let out = match git()
+        .args([
+            "-C",
+            root,
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return GitList::Unavailable("git could not be run".into()),
+    };
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // git reports both "not a repository" and real errors as exit 128;
+        // only the former is the routine "this root isn't a repo" case.
+        if msg.contains("not a git repository") {
+            return GitList::NotARepo;
+        }
+        return GitList::Unavailable(msg);
+    }
+    let mut files = Vec::new();
+    for rel in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+        let rel = String::from_utf8_lossy(rel);
+        // git always prints '/'; rebuild with the platform separator so the
+        // stored names look the same as walked ones do.
+        let mut path = PathBuf::from(root);
+        path.extend(rel.split('/'));
+        files.push(path);
+    }
+    GitList::Files(files)
+}
+
+/// The files a version-control system listed under `root`, filtered by the
+/// same rules a walk applies, in path order, appended to `files`.
+fn keep_listed(
+    root: &str,
+    listed: Vec<PathBuf>,
+    opts: &ListOptions,
+    files: &mut Vec<FileEntry>,
+    too_large: &mut usize,
+) {
+    let start = files.len();
+    for path in listed {
+        // The same name rules as the walk, applied to every component below
+        // the root, so `.github/` and editor droppings are treated exactly as
+        // they are when walking (and as ripgrep treats them).
+        let hidden = path.strip_prefix(root).is_ok_and(|rel| {
+            rel.components()
+                .any(|c| c.as_os_str().to_str().is_some_and(skip_name))
+        });
+        if hidden {
+            continue;
+        }
+        // The list may name a file deleted since, a symlink, or a submodule
+        // or nested-repository directory; only regular files are indexed, as
+        // with walking.
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let len = meta.len();
+        if len > opts.max_file_bytes {
+            eprintln!(
+                "{CINDEX}: {}: {len} bytes is over the {}-byte limit, skipping",
+                path.display(),
+                opts.max_file_bytes
+            );
+            *too_large += 1;
+            continue;
+        }
+        files.push(FileEntry {
+            path,
+            len,
+            mtime: meta.modified().ok(),
+        });
+    }
+    // A version-control system lists in its own order; sort so file ids are
+    // deterministic and path-ordered, as they are when walking.
+    files[start..].sort_by(|a, b| a.path.cmp(&b.path));
+}
+
+/// The newest modification time among `files`, if every one of them is a
+/// whole number of seconds -- the mark of a file system that cannot tell two
+/// quick writes apart. `None` if any file carries a sub-second time (the file
+/// system keeps them, so nothing here is ambiguous), or if there are no files.
+fn newest_if_coarse(files: &[FileEntry]) -> Option<SystemTime> {
+    let coarse = !files.is_empty()
+        && files
+            .iter()
+            .all(|f| matches!(epoch_parts(f.mtime), Some((_, 0))));
+    if coarse {
+        files.iter().filter_map(|f| f.mtime).max()
+    } else {
+        None
+    }
+}
+
+/// List the files under `roots`, each from its own source.
+///
+/// A root whose version-control listing is unavailable is walked instead,
+/// with the reason on stderr -- unless `opts.strict`, in which case that is
+/// an error and nothing is listed.
+pub fn snapshot(roots: &[Root], opts: &ListOptions) -> Result<Snapshot> {
+    let taken_at = SystemTime::now();
+    let mut files = Vec::new();
+    let mut too_large = 0usize;
+    let mut newest_coarse_mtime = None;
+    for root in roots {
+        let start = files.len();
+        match root.source {
+            Source::Walk => walk(&root.path, opts, &mut files, &mut too_large),
+            Source::Git => match git_files(&root.path) {
+                GitList::Files(listed) => {
+                    keep_listed(&root.path, listed, opts, &mut files, &mut too_large)
+                }
+                GitList::NotARepo => {
+                    eprintln!(
+                        "{CINDEX}: {}: not a git work tree, walking the directory instead",
+                        root.path
+                    );
+                    walk(&root.path, opts, &mut files, &mut too_large);
+                }
+                GitList::Unavailable(msg) => {
+                    if opts.strict {
+                        bail!(
+                            "{}: git could not list the files ({})",
+                            root.path,
+                            msg.lines().next().unwrap_or("no message")
+                        );
+                    }
+                    // Show git's own words: silently walking would index the
+                    // very files --git was meant to exclude, so the user
+                    // should see why.
+                    eprintln!(
+                        "{CINDEX}: {}: could not use git, walking the directory instead",
+                        root.path
+                    );
+                    for line in msg.lines() {
+                        eprintln!("{CINDEX}:   {line}");
+                    }
+                    walk(&root.path, opts, &mut files, &mut too_large);
+                }
+            },
+        }
+        newest_coarse_mtime = newest_coarse_mtime.max(newest_if_coarse(&files[start..]));
+    }
+    let fingerprint = fingerprint(roots, &files);
+    Ok(Snapshot {
+        roots: roots.to_vec(),
+        files,
+        too_large,
+        taken_at,
+        fingerprint,
+        newest_coarse_mtime,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn entry(path: &str, len: u64, secs: u64, nanos: u32) -> FileEntry {
+        FileEntry {
+            path: PathBuf::from(path),
+            len,
+            mtime: Some(UNIX_EPOCH + Duration::new(secs, nanos)),
+        }
+    }
+
+    fn root(path: &str, source: Source) -> Root {
+        Root {
+            path: path.into(),
+            source,
+        }
+    }
+
+    #[test]
+    fn source_tags_round_trip() {
+        for s in Source::ALL {
+            assert_eq!(Source::from_tag(s.tag()), Some(s));
+        }
+        assert_eq!(Source::from_tag("svn"), None);
+        assert_eq!(Source::from_tag(""), None);
+    }
+
+    #[test]
+    fn a_root_is_coarse_only_if_every_timestamp_is_a_whole_second() {
+        let whole = vec![
+            entry("/r/a", 1, 100, 0),
+            entry("/r/b", 1, 300, 0),
+            entry("/r/c", 1, 200, 0),
+        ];
+        assert_eq!(
+            newest_if_coarse(&whole),
+            Some(UNIX_EPOCH + Duration::from_secs(300))
+        );
+        // One sub-second time is proof that the file system keeps them.
+        let mut mixed = whole.clone();
+        mixed[0].mtime = Some(UNIX_EPOCH + Duration::new(100, 250_000_000));
+        assert_eq!(newest_if_coarse(&mixed), None);
+        // No files, or a file with no time at all, says nothing either way.
+        assert_eq!(newest_if_coarse(&[]), None);
+        let mut unknown = whole.clone();
+        unknown[2].mtime = None;
+        assert_eq!(newest_if_coarse(&unknown), None);
+    }
+
+    #[test]
+    fn the_fingerprint_sees_every_kind_of_change() {
+        let roots = [root("/r", Source::Walk)];
+        // Times differ by at least 100 ns: that is as fine as a timestamp
+        // gets on Windows, and a smaller step would be no step at all there.
+        let base = vec![entry("/r/a", 10, 100, 500), entry("/r/b", 20, 200, 600)];
+        let fp = fingerprint(&roots, &base);
+        assert_eq!(fp, fingerprint(&roots, &base.clone()), "must be stable");
+
+        let mut grown = base.clone();
+        grown[0].len = 11;
+        let mut touched = base.clone();
+        touched[1].mtime = Some(UNIX_EPOCH + Duration::new(200, 700));
+        let mut renamed = base.clone();
+        renamed[1].path = PathBuf::from("/r/c");
+        let mut added = base.clone();
+        added.push(entry("/r/z", 0, 1, 100));
+        let removed = base[..1].to_vec();
+        let mut no_time = base.clone();
+        no_time[0].mtime = None;
+        for (what, files) in [
+            ("size", grown),
+            ("mtime", touched),
+            ("name", renamed),
+            ("an added file", added),
+            ("a removed file", removed),
+            ("a lost timestamp", no_time),
+        ] {
+            assert_ne!(fp, fingerprint(&roots, &files), "blind to {what}");
+        }
+
+        // The same files reached through a different listing are a different
+        // index: a git listing leaves out what a walk includes.
+        assert_ne!(fp, fingerprint(&[root("/r", Source::Git)], &base));
+        assert_ne!(fp, fingerprint(&[root("/q", Source::Walk)], &base));
+        // And moving a byte between adjacent fields must not cancel out.
+        let a = [entry("/r/ab", 1, 1, 100)];
+        let b = [entry("/r/a", 1, 1, 100)];
+        assert_ne!(fingerprint(&roots, &a), fingerprint(&roots, &b));
+    }
+}

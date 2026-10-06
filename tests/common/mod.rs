@@ -7,6 +7,7 @@ use csearch::names::{original, INDEX_ENV};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The binaries cargo built for this test run. The names here are the one
 /// place the tests spell them out; `tests/names.rs` checks they agree with
@@ -92,4 +93,62 @@ pub fn run_from(exe: &str, cwd: &Path, home: &Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("run")
+}
+
+/// Set a file's modification time.
+pub fn set_mtime(path: &Path, time: SystemTime) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(time))
+        .unwrap_or_else(|e| panic!("setting the time of {}: {e}", path.display()));
+}
+
+/// Give every file under `root` a modification time ten seconds in the past
+/// and off the whole second, as if the tree had been sitting untouched.
+///
+/// `--if-changed` will not vouch for a file written within two seconds of the
+/// build on a file system that keeps whole-second timestamps, because there a
+/// second write can hide behind the first. Freshly created test files are
+/// always that recent, and the temporary directory may well be on such a file
+/// system: exFAT as Windows mounts it keeps modification times to two
+/// seconds. A test that expects "nothing changed" must not depend on where it
+/// happens to run; settling the tree takes that out of play. Tests of the
+/// rule itself set the times they need instead.
+pub fn settle(root: &Path) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let then = UNIX_EPOCH + Duration::new(now.as_secs() - 10, 500_000_000);
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            // Version-control metadata is not indexed and is not ours to age.
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file() {
+                set_mtime(&entry.path(), then);
+            }
+        }
+    }
+}
+
+/// Turn the index at `index` into one written by another version of
+/// csearch-rs: this project's magic, a version number that never existed, and
+/// the same length as before -- so that a stamp recorded beside the real
+/// index still describes this file as far as its size goes, and only the
+/// format stands between it and "nothing has changed". Returns what was
+/// written.
+pub fn as_another_format_version(index: &Path) -> Vec<u8> {
+    let len = usize::try_from(fs::metadata(index).unwrap().len()).unwrap();
+    let mut bytes = csearch::write::MAGIC_FAMILY.to_vec();
+    bytes.extend_from_slice(b"0\n");
+    assert!(!bytes.starts_with(csearch::write::MAGIC));
+    assert!(len >= bytes.len(), "the index is too small to stand in for");
+    bytes.resize(len, b'x');
+    fs::write(index, &bytes).unwrap();
+    bytes
 }

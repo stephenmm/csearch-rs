@@ -150,11 +150,17 @@ fn the_originals_index_files_are_never_touched() {
 
     // git was told to ignore our file, and only ours.
     let exclude = fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
-    assert!(exclude.lines().any(|l| l == INDEX_FILE_NAME), "{exclude}");
+    let ours = format!("{INDEX_FILE_NAME}*");
+    assert!(exclude.lines().any(|l| l == ours), "{exclude}");
+    // The pattern must not reach the original's file either: `.csearchindex`
+    // does not begin with `.csearch-rs-index`.
     assert!(
-        !exclude.lines().any(|l| l == original::INDEX_FILE_NAME),
+        !exclude
+            .lines()
+            .any(|l| l.contains(original::INDEX_FILE_NAME)),
         "{exclude}"
     );
+    assert!(!original::INDEX_FILE_NAME.starts_with(INDEX_FILE_NAME));
 }
 
 #[test]

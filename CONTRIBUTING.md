@@ -53,6 +53,17 @@ platform-specific, expect the other platform to have an opinion.
   github.com/google/codesearch/cmd/{cindex,csearch}@v1.2.0` provides them), and
   CI sets `CSEARCH_RS_REQUIRE_ORIGINAL=1` so that there a missing original is
   a failure, not a skip.
+- `tests/refresh.rs`, `tests/listing_source.rs`, `tests/githead.rs` and
+  `tests/hooks.rs` cover keeping an index fresh: what counts as a change, how
+  each root is listed, the lock, and `cindex-rs --hook` as git, Mercurial and a
+  shell wrapper run it. The wrapper test runs in every shell it finds and
+  skips, with a message, the ones that are not installed.
+  `CSEARCH_RS_REQUIRE_SHELLS=bash,zsh,...` and `CSEARCH_RS_REQUIRE_HG=1` turn
+  those skips into failures; CI sets both, per platform, in the build matrix.
+- Those tests start processes and wait for them. When one needs another
+  process to have got somewhere, it waits for evidence of that -- a line on
+  stderr, a file appearing, a lock being taken -- and never for a length of
+  time. Two tests that slept instead failed on a busy machine.
 - `tests/corruption.rs` damages every field of an index in turn. A malformed
   index must produce an error, never a panic.
 - `tests/superset.rs` is a randomised property test of the guarantee the whole

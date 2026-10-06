@@ -41,11 +41,12 @@ working directory outside any repository. It indexes that root into
 
 - **implies `--git`**, so the file list comes from `git ls-files` and ignored
   files never enter the index (`--no-git` walks instead);
-- **appends `.csearch-rs-index` to `info/exclude`** (`git rev-parse --git-path
-  info/exclude`, which is correct for worktrees; `.git/info/exclude` as the
-  fallback). That file is local to the clone, so `git status` stays clean and
-  no tracked file — in particular the committed `.gitignore` — is touched.
-  Idempotent.
+- **appends `.csearch-rs-index*` to `info/exclude`** (`git rev-parse
+  --git-path info/exclude`, which is correct for worktrees;
+  `.git/info/exclude` as the fallback). That file is local to the clone, so
+  `git status` stays clean and no tracked file — in particular the committed
+  `.gitignore` — is touched. Idempotent. (The pattern has ended in `*` since
+  0.4, to cover the files that sit beside the index.)
 
 After that, plain `cindex-rs` anywhere inside the repository rebuilds the
 local index, and `csearch-rs` anywhere inside it searches that index, with no
@@ -78,6 +79,12 @@ apply to plain directories. Not chosen; easy to add later as an option.
   `$CSEARCHINDEX` is not consulted at step 2 (`tests/coexist.rs`).
 
 ## Automatic refresh (part 3)
+
+*As first built, for git only. 0.4 kept the flags and replaced most of what is
+behind them — the stamp is a fingerprint of the file listing rather than of
+git's state, the hooks run `cindex-rs --local --hook`, and the staleness note
+reads `HEAD` from the repository's files instead of starting git. See
+[refreshing from any version-control system](refresh-from-any-vcs.md).*
 
 Built on the per-project index:
 

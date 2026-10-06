@@ -12,12 +12,16 @@
 //! of their own (see [`names`]), so this can be installed next to the
 //! original without either disturbing the other.
 
-pub mod gitstate;
+pub mod githead;
+pub mod hook;
+pub mod listing;
+pub mod lock;
 pub mod names;
 pub mod paths;
 pub mod query;
 pub mod read;
 pub mod regexp;
+pub mod stamp;
 pub mod trigram;
 pub mod varint;
 pub mod write;
