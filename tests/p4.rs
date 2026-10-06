@@ -13,7 +13,7 @@ mod common;
 
 use common::{command_from, settle, text, CINDEX, CSEARCH};
 use csearch::lock;
-use csearch::names::INDEX_FILE_NAME;
+use csearch::names::{INDEX_ENV, INDEX_FILE_NAME};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -235,12 +235,8 @@ fn a_workspace_is_listed_the_way_perforce_sees_it() {
     assert!(!ws.join("gone.c").exists());
     settle(&ws);
 
-    // From a subdirectory: --local --p4 puts the index at the workspace's
-    // root, not where the command happened to be typed.
-    let out = w.run(CINDEX, &ws.join("sub"), "ws", &["--local", "--p4"]);
+    let out = w.run(CINDEX, &ws, "ws", &["--local", "--p4"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(ws.join(INDEX_FILE_NAME).is_file(), "{}", text(&out.stderr));
-    assert!(!ws.join("sub").join(INDEX_FILE_NAME).exists());
     // Perforce has no ignore file that is ours to write to, so the user is
     // told, this once, what to put in theirs.
     assert!(
@@ -283,6 +279,106 @@ fn a_workspace_is_listed_the_way_perforce_sees_it() {
     );
     assert!(w.finds(&ws, "marker_opened_for_add", "new.c"));
     assert!(!w.finds(&ws, "marker_never_added", "build.o"));
+}
+
+#[test]
+fn local_p4_puts_the_index_at_the_root_of_the_workspace() {
+    // Typed three directories down, `--local --p4` still means the whole
+    // workspace: the index goes at its root, as `--local` puts one at the
+    // root of a git repository.
+    let Some(w) = World::new() else { return };
+    let ws = w.client("ws");
+    w.submit_new(
+        &ws,
+        "ws",
+        &[
+            ("top.c", "int marker_top;\n"),
+            ("one/two/three/deep.c", "int marker_deep;\n"),
+        ],
+        "one",
+    );
+    settle(&ws);
+    let deep = ws.join("one").join("two").join("three");
+
+    let out = w.run(CINDEX, &deep, "ws", &["--local", "--p4"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(ws.join(INDEX_FILE_NAME).is_file(), "{}", text(&out.stderr));
+    for inner in [ws.join("one"), ws.join("one").join("two"), deep.clone()] {
+        assert!(
+            !inner.join(INDEX_FILE_NAME).exists(),
+            "an index was left in {}",
+            inner.display()
+        );
+    }
+    // And it is the whole workspace that was indexed, searched from where
+    // the command was typed.
+    assert!(w.finds(&deep, "marker_top", "top.c"));
+    assert!(w.finds(&deep, "marker_deep", "deep.c"));
+}
+
+#[test]
+fn each_root_is_listed_by_the_workspace_it_is_in() {
+    // One index over two workspaces, each named by a P4CONFIG file at its
+    // root -- the usual way of having more than one. p4 decides which
+    // workspace it is talking about from where it is run. So whichever
+    // directory the indexer happens to be in, each root has to be asked
+    // about from inside that root, or the answer is for the wrong workspace
+    // and none of its files are under the root being listed.
+    let Some(w) = World::new() else { return };
+    let one = w.client("one");
+    let two = w.client("two");
+    w.submit_new(&one, "one", &[("a.c", "int marker_in_one;\n")], "first");
+    w.submit_new(&two, "two", &[("b.c", "int marker_in_two;\n")], "second");
+    for (root, name) in [(&one, "one"), (&two, "two")] {
+        fs::write(root.join(".p4config"), format!("P4CLIENT={name}\n")).unwrap();
+        settle(root);
+    }
+    let index = w.dir.path().join("shared-index");
+    // No P4CLIENT in the environment: only the files say which workspace.
+    let indexer = |cwd: &Path, args: &[&str]| {
+        w.command(CINDEX, cwd, "nobody")
+            .env_remove("P4CLIENT")
+            .env("P4CONFIG", ".p4config")
+            .env(INDEX_ENV, &index)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let found = |pattern: &str| -> Vec<String> {
+        let out = command_from(CSEARCH, w.dir.path(), &w.home)
+            .env(INDEX_ENV, &index)
+            .args(["-l", pattern])
+            .output()
+            .unwrap();
+        let mut names: Vec<String> = text(&out.stdout)
+            .lines()
+            .map(|l| {
+                Path::new(l)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    };
+
+    // Run from inside the first workspace, naming both.
+    let out = indexer(
+        &one,
+        &["--p4", one.to_str().unwrap(), two.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(found("marker_in_"), ["a.c", "b.c"]);
+
+    // And refreshed from inside the second, naming neither.
+    fs::write(one.join("a.c"), "int marker_in_one;\nint marker_later;\n").unwrap();
+    let out = indexer(&two, &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(found("marker_later"), ["a.c"]);
+    assert_eq!(found("marker_in_"), ["a.c", "b.c"]);
 }
 
 #[test]
